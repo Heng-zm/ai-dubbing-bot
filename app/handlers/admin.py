@@ -31,6 +31,8 @@ SETTING_UI_LABELS = {
     "max_video_duration_seconds": "⏱ Max video duration",
     "max_video_size_mb": "📦 Max video size",
     "max_srt_size_mb": "📝 Max SRT size",
+    "max_subtitle_chars": "🔤 Max subtitle chars",
+    "min_subtitle_duration_seconds": "⏱ Min subtitle duration",
     "tts_provider": "🎙️ TTS provider",
     "tts_cache_enabled": "⚡ TTS cache",
     "keep_original_audio": "🎚 Keep original audio",
@@ -71,12 +73,16 @@ def _setting_value(key: str, value: Any) -> str:
         return f"{display_value(key, value)}s"
     if key == "auto_srt_fixer_min_gap_ms":
         return f"{display_value(key, value)}ms"
+    if key == "min_subtitle_duration_seconds":
+        return f"{display_value(key, value)}s"
     return display_value(key, value)
 
 SETTING_ORDER = [
     "max_video_duration_seconds",
     "max_video_size_mb",
     "max_srt_size_mb",
+    "max_subtitle_chars",
+    "min_subtitle_duration_seconds",
     "auto_srt_fixer_enabled",
     "auto_srt_fixer_max_overlap_seconds",
     "auto_srt_fixer_max_video_overrun_seconds",

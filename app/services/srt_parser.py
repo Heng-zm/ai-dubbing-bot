@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List
 
 from app.config import settings
+from app.services.runtime_settings import runtime_settings
 from app.utils.text_utils import normalize_tts_text
 from app.utils.time_utils import srt_timestamp_to_seconds
 
@@ -89,17 +90,21 @@ def parse_srt_text(text: str) -> List[SubtitleItem]:
     if not items:
         raise ValueError("invalid_srt")
 
+    runtime = runtime_settings.cached()
+    min_duration = float(runtime.get("min_subtitle_duration_seconds", settings.min_subtitle_duration_seconds))
+    max_chars = int(runtime.get("max_subtitle_chars", settings.max_subtitle_chars))
+
     previous_end = -1.0
     for item in items:
         if item.end <= item.start:
             raise ValueError("invalid_srt_timing")
-        if item.duration < settings.min_subtitle_duration_seconds:
+        if item.duration < min_duration:
             raise ValueError("subtitle_too_short")
         if item.start < previous_end - 0.05:
             raise ValueError("subtitle_overlap")
         if not item.text:
             raise ValueError("empty_subtitle")
-        if len(item.text) > settings.max_subtitle_chars:
+        if len(item.text) > max_chars:
             raise ValueError("subtitle_too_long")
         previous_end = item.end
     return items
@@ -112,7 +117,9 @@ def parse_srt_file(path: Path) -> List[SubtitleItem]:
 def validate_srt_file(path: Path, video_duration: float) -> List[SubtitleItem]:
     if not path.exists() or path.stat().st_size <= 0:
         raise ValueError("invalid_srt")
-    if path.stat().st_size > settings.max_srt_size_bytes:
+    runtime = runtime_settings.cached()
+    max_srt_size_mb = int(runtime.get("max_srt_size_mb", settings.max_srt_size_mb))
+    if path.stat().st_size > max_srt_size_mb * 1024 * 1024:
         raise ValueError("srt_too_large")
     items = parse_srt_file(path)
     last_end = max(item.end for item in items)

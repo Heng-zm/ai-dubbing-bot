@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import time
 import traceback
@@ -87,15 +88,60 @@ class ProgressReporter:
             logger.debug("Could not edit progress message: %s", exc)
 
 
+async def _await_with_heartbeat(
+    awaitable,
+    *,
+    progress: ProgressReporter,
+    task_id: str,
+    steps: list[tuple[int, str]],
+    tick_seconds: float = 12.0,
+):
+    """Await a long operation while keeping Telegram and Redis progress alive.
+
+    The previous flow could look frozen at 78% while ffmpeg was encoding the
+    output video or Telegram was uploading the finished file. This helper does
+    not fake completion; it gently moves within a bounded percent range and
+    refreshes cancellation/lock state so the user sees that the task is still
+    alive. The wrapped operation still owns its own hard timeout.
+    """
+    task = asyncio.create_task(awaitable)
+    step_index = 0
+    try:
+        while not task.done():
+            await asyncio.sleep(tick_seconds)
+            await _raise_if_cancelled(task_id)
+            await redis_service.refresh_task_lock(task_id)
+            if steps:
+                percent, message = steps[min(step_index, len(steps) - 1)]
+                await progress.edit(percent, message, force=True)
+                if step_index < len(steps) - 1:
+                    step_index += 1
+        return await task
+    except Exception:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+        raise
+
+
 async def _send_video_with_retry(bot: Bot, chat_id: int, video_path: Path) -> None:
+    """Send final output with video first, then document fallback.
+
+    Telegram can reject send_video for some codecs/files even when the MP4 exists.
+    A document fallback prevents a completed task from being marked failed only
+    because Telegram could not render it as a streaming video.
+    """
     last_error: Exception | None = None
+    caption = "✅ ការបញ្ចូលសម្លេងរឿងរួចរាល់ហើយ!"
+
     for attempt in range(1, settings.telegram_send_max_retries + 1):
         try:
             with video_path.open("rb") as video_file:
                 await bot.send_video(
                     chat_id=chat_id,
                     video=video_file,
-                    caption="✅ ការបញ្ចូលសម្លេងរឿងរួចរាល់ហើយ!",
+                    caption=caption,
                     supports_streaming=True,
                     read_timeout=180,
                     write_timeout=180,
@@ -108,7 +154,27 @@ async def _send_video_with_retry(bot: Bot, chat_id: int, video_path: Path) -> No
             logger.warning("Send video attempt %s/%s failed: %s", attempt, settings.telegram_send_max_retries, exc)
             await asyncio.sleep(min(attempt * 3, 12))
     else:
-        raise RuntimeError(f"Failed to send final video: {last_error}")
+        logger.warning("send_video failed after retries; trying send_document fallback: %s", last_error)
+        for attempt in range(1, settings.telegram_send_max_retries + 1):
+            try:
+                with video_path.open("rb") as video_file:
+                    await bot.send_document(
+                        chat_id=chat_id,
+                        document=video_file,
+                        filename=video_path.name,
+                        caption=caption + "\n\n📎 ផ្ញើជា Document ព្រោះ Telegram មិនអាច preview ជា Video បាន។",
+                        read_timeout=180,
+                        write_timeout=180,
+                        connect_timeout=60,
+                        pool_timeout=60,
+                    )
+                break
+            except TelegramError as exc:
+                last_error = exc
+                logger.warning("Send document attempt %s/%s failed: %s", attempt, settings.telegram_send_max_retries, exc)
+                await asyncio.sleep(min(attempt * 3, 12))
+        else:
+            raise RuntimeError(f"Failed to send final video/document: {last_error}")
 
     # The follow-up message is helpful but should never cause duplicate video sends.
     try:
@@ -194,10 +260,32 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
 
         await _raise_if_cancelled(task_id)
         await redis_service.refresh_task_lock(task_id)
-        await merge_audio_with_video(video_path, dubbed_audio, output_path)
-        await progress.edit(92, f"🎬 កំពុងបញ្ចូលសម្លេងទៅក្នុងវីដេអូ...\n\n{percent_line(92)}", force=True)
+        await progress.edit(80, f"🎬 កំពុងបញ្ចូលសម្លេងទៅក្នុងវីដេអូ...\n\n{percent_line(80)}", force=True)
+        logger.info("worker | merging audio/video | task_id=%s video=%s audio=%s output=%s", task_id, video_path, dubbed_audio, output_path)
+        await _await_with_heartbeat(
+            merge_audio_with_video(video_path, dubbed_audio, output_path),
+            progress=progress,
+            task_id=task_id,
+            steps=[
+                (84, f"🎬 កំពុង Encode វីដេអូ... សូមរង់ចាំបន្តិច\n\n{percent_line(84)}"),
+                (88, f"🎬 កំពុងបញ្ចប់ការបញ្ចូលសម្លេង...\n\n{percent_line(88)}"),
+                (91, f"📦 កំពុងរៀបចំឯកសារលទ្ធផល...\n\n{percent_line(91)}"),
+            ],
+        )
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            raise RuntimeError("ffmpeg output file was not created or is empty")
+        await progress.edit(92, f"📤 កំពុងផ្ញើវីដេអូទៅ Telegram...\n\n{percent_line(92)}", force=True)
 
-        await _send_video_with_retry(bot, chat_id, output_path)
+        await _await_with_heartbeat(
+            _send_video_with_retry(bot, chat_id, output_path),
+            progress=progress,
+            task_id=task_id,
+            steps=[
+                (95, f"📤 កំពុង Upload លទ្ធផលទៅ Telegram...\n\n{percent_line(95)}"),
+                (98, f"📤 ជិតរួចរាល់ហើយ...\n\n{percent_line(98)}"),
+            ],
+            tick_seconds=15.0,
+        )
         await update_task_status(task_id, TASK_COMPLETED, 100, output_file_path=str(output_path), mark_finished=True)
         await progress.edit(100, f"✅ រួចរាល់!\n\n{percent_line(100)}", force=True)
         await redis_service.set_user_state(telegram_user_id, STATE_IDLE)

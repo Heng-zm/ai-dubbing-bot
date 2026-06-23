@@ -4,6 +4,18 @@ Production-ready Telegram bot project for Khmer AI video dubbing. Users upload a
 
 This version supports **single-service deployment**. When `IN_PROCESS_WORKER=true`, the Telegram bot also runs the Redis queue processor inside the same process, so you do **not** need a separate Render worker service.
 
+
+## Latest maintenance update
+
+This build includes additional production hardening:
+
+- `/start` no longer clears an active queued/processing task. It shows status instead.
+- SRT validation uses runtime admin settings, not only `.env` defaults.
+- Optional migration `database/migrations/005_maintenance_runtime_validation_settings.sql` adds default rows for validation settings.
+- Final output delivery falls back from `send_video` to `send_document` if Telegram cannot preview the MP4.
+- Gemini prompt remains formatted as a monospace copy block.
+- Python compile checks were run successfully before packaging.
+
 ## Features
 
 - Khmer Telegram user flow with inline buttons
@@ -777,3 +789,16 @@ Then redeploy Render:
 ```text
 Manual Deploy → Clear build cache & deploy
 ```
+
+### Fix for progress stuck at 78%
+
+This version updates the worker progress flow. The 78% stage is where final audio is ready and ffmpeg starts merging/encoding the video. On Render this can take time, especially when watermarking requires video re-encoding. The bot now sends heartbeat progress updates at 80%, 84%, 88%, 91%, 92%, 95%, and 98% instead of appearing frozen.
+
+Optional env setting:
+
+```env
+FFMPEG_MERGE_TIMEOUT_SECONDS=420
+```
+
+If ffmpeg cannot finish inside the timeout, the task fails cleanly and the user can retry instead of waiting forever.
+

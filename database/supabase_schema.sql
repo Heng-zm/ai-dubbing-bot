@@ -63,6 +63,8 @@ values
     ('max_video_duration_seconds', '60', 'int'),
     ('max_video_size_mb', '50', 'int'),
     ('max_srt_size_mb', '2', 'int'),
+    ('max_subtitle_chars', '450', 'int'),
+    ('min_subtitle_duration_seconds', '0.20', 'float'),
     ('auto_srt_fixer_enabled', 'true', 'bool'),
     ('auto_srt_fixer_max_overlap_seconds', '1.2', 'float'),
     ('auto_srt_fixer_max_video_overrun_seconds', '2.0', 'float'),

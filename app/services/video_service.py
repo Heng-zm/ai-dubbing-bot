@@ -181,7 +181,7 @@ async def merge_audio_with_video(
                 "-shortest",
                 str(output_path),
             ]
-        await run_subprocess(cmd, timeout=900)
+        await run_subprocess(cmd, timeout=settings.ffmpeg_merge_timeout_seconds)
 
     try:
         await _run_merge(watermark_enabled)

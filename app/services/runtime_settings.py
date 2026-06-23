@@ -36,6 +36,10 @@ SETTING_DEFS: dict[str, SettingDef] = {
     ),
     "max_video_size_mb": SettingDef("max_video_size_mb", "Max video size", "int", settings.max_video_size_mb, "MB", 1, 2000),
     "max_srt_size_mb": SettingDef("max_srt_size_mb", "Max SRT size", "int", settings.max_srt_size_mb, "MB", 1, 50),
+    "max_subtitle_chars": SettingDef("max_subtitle_chars", "Max subtitle chars", "int", settings.max_subtitle_chars, "per subtitle block", 50, 2000),
+    "min_subtitle_duration_seconds": SettingDef(
+        "min_subtitle_duration_seconds", "Min subtitle duration", "float", settings.min_subtitle_duration_seconds, "seconds", 0.05, 2.0
+    ),
     "tts_provider": SettingDef(
         "tts_provider", "TTS provider", "choice", settings.tts_provider, "edge / auto / azure", choices=("edge", "auto", "azure")
     ),

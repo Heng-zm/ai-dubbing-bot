@@ -10,21 +10,64 @@ from app.services.logger_service import logger
 from app.services.redis_service import redis_service
 from app.services.runtime_settings import runtime_settings
 from app.services.supabase_service import supabase_service
-from app.states import STATE_WAITING_VIDEO, VOICE_FEMALE, VOICE_MALE
-from app.utils.telegram_ui import step_title
+from app.states import STATE_WAITING_VIDEO, TASK_PROCESSING, TASK_QUEUED, VOICE_FEMALE, VOICE_MALE
+from app.utils.telegram_ui import percent_line, status_label, step_title
+
+
+async def _reply_or_edit(update: Update, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    """Reply for commands and edit for callback buttons without duplicating UI code."""
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+
+
+async def _get_active_task_status(user_id: int) -> tuple[str | None, str | None, str | int]:
+    """Return current task id/status/progress for active queue/processing tasks only."""
+    task_id = await redis_service.get_user_task(user_id)
+    if not task_id:
+        return None, None, 0
+
+    redis_status = await redis_service.get_task_status(task_id)
+    raw_status = redis_status.get("status")
+    progress: str | int = redis_status.get("progress") or 0
+
+    if not raw_status:
+        try:
+            task = await supabase_service.get_task(task_id)
+            raw_status = str((task or {}).get("status") or "")
+            progress = (task or {}).get("progress") or 0
+        except Exception as exc:
+            logger.debug("Could not load task status on /start: %s", exc)
+
+    if raw_status in {TASK_QUEUED, TASK_PROCESSING}:
+        return task_id, raw_status, progress
+    return None, None, 0
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reset the user's flow and show a clean Khmer welcome screen."""
+    """Show welcome screen without accidentally hiding an active task."""
     user = update.effective_user
     if user:
+        active_task_id, active_status, active_progress = await _get_active_task_status(user.id)
+        if active_task_id and active_status:
+            await _reply_or_edit(
+                update,
+                "⚙️ Task របស់អ្នកកំពុងដំណើរការ។\n\n"
+                f"🆔 ID: {active_task_id[:8]}\n"
+                f"📌 Status: {status_label(active_status)}\n"
+                f"📊 Progress: {percent_line(active_progress)}\n\n"
+                "ប្រើ /status ដើម្បីមើលស្ថានភាព ឬ /cancel ដើម្បីបោះបង់។",
+            )
+            return
+
         await redis_service.clear_user_flow(user.id)
         try:
             await supabase_service.upsert_user(user)
         except Exception as exc:
             logger.warning("Could not upsert user on /start: %s", exc)
 
-    runtime = runtime_settings.cached()
+    runtime = await runtime_settings.load()
     max_duration = runtime.get("max_video_duration_seconds", settings.max_video_duration_seconds)
     max_video_size = runtime.get("max_video_size_mb", settings.max_video_size_mb)
     max_srt_size = runtime.get("max_srt_size_mb", settings.max_srt_size_mb)
@@ -45,10 +88,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• ជ្រើសសម្លេង ប្រុស ឬ ស្រី\n\n"
         "ចុចប៊ូតុងខាងក្រោម ដើម្បីចាប់ផ្តើម។"
     )
-    if update.message:
-        await update.message.reply_text(text, reply_markup=keyboard)
-    elif update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=keyboard)
+    await _reply_or_edit(update, text, keyboard)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

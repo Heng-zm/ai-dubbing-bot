@@ -1,10 +1,39 @@
 
+## 78% Progress Freeze Hotfix
+
+- Added merge/upload progress heartbeat so the bot no longer appears stuck at 78%.
+- Progress now moves through 80%, 84%, 88%, 91%, 92%, 95%, and 98% during ffmpeg encode and Telegram upload.
+- Added a hard ffmpeg merge timeout with `FFMPEG_MERGE_TIMEOUT_SECONDS` defaulting to 420 seconds.
+- Added output-file validation after ffmpeg merge.
+- Added clearer logs around the audio/video merge stage.
+
+# Changelog
+
+## 2026-06-23 Stability + Performance Maintenance Update
+
+### Bug fixes
+
+- Prevent `/start` from accidentally hiding an active queued/processing task. If the user already has an active task, the bot now shows the current status instead of clearing the flow.
+- SRT validation now respects admin runtime settings for max SRT size, max subtitle characters, and minimum subtitle duration.
+- Added safer final delivery fallback: if Telegram rejects `send_video`, the bot retries as `send_document` before marking the task failed.
+- Kept the Gemini SRT prompt in a monospace Telegram code block with safe HTML escaping.
+
+### Performance improvements
+
+- Runtime settings are loaded once at the beginning of the `/start` flow, avoiding stale/default limits in welcome text.
+- Final-video delivery retries are more resilient to Telegram preview/codec problems.
+- Existing queue deduplication, progress throttling, and TTS cache remain enabled.
+
+### Deployment
+
+No required Supabase schema change. Optional migration `005_maintenance_runtime_validation_settings.sql` adds default rows for the new admin-visible validation settings.
+
+
 ## Prompt Monospace Update
 
 - Gemini SRT prompt now renders as a Telegram monospace/code block using HTML `<pre>`.
 - Added safe HTML escaping for the copy-ready Gemini prompt.
 
-# Changelog
 
 ## 2026-06-23 Production Bug Fixes + Performance Update
 

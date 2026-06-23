@@ -122,6 +122,7 @@ class Settings:
     ffprobe_binary: str
     ffmpeg_preset: str
     ffmpeg_video_crf: int
+    ffmpeg_merge_timeout_seconds: int
 
     in_process_worker: bool
     in_process_worker_count: int
@@ -210,6 +211,7 @@ settings = Settings(
     ffprobe_binary=os.getenv("FFPROBE_BINARY", "ffprobe").strip(),
     ffmpeg_preset=os.getenv("FFMPEG_PRESET", "veryfast").strip(),
     ffmpeg_video_crf=_get_int("FFMPEG_VIDEO_CRF", 23),
+    ffmpeg_merge_timeout_seconds=max(120, _get_int("FFMPEG_MERGE_TIMEOUT_SECONDS", 420)),
     in_process_worker=_get_bool("IN_PROCESS_WORKER", True),
     in_process_worker_count=max(1, _get_int("IN_PROCESS_WORKER_COUNT", 1)),
     enable_health_server=_get_bool("ENABLE_HEALTH_SERVER", bool(os.getenv("PORT"))),
