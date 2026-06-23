@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 from app.config import settings
@@ -21,7 +21,7 @@ from app.services.runtime_settings import runtime_settings
 from app.services.srt_parser import validate_srt_file
 from app.services.task_service import update_task_status
 from app.services.video_service import merge_audio_with_video
-from app.states import STATE_IDLE, TASK_COMPLETED, TASK_FAILED, TASK_PROCESSING
+from app.states import STATE_IDLE, TASK_CANCELLED, TASK_COMPLETED, TASK_FAILED, TASK_PROCESSING
 from app.utils.file_utils import check_ffmpeg_available, clean_task_files
 from app.utils.telegram_ui import percent_line
 
@@ -29,6 +29,16 @@ from app.utils.telegram_ui import percent_line
 
 class StaleTaskFileError(RuntimeError):
     """Raised when a queued job points to a local temp file that no longer exists."""
+
+
+class UserCancelledTask(RuntimeError):
+    """Raised when a task was cancelled while a worker was between stages."""
+
+
+async def _raise_if_cancelled(task_id: str) -> None:
+    status = await redis_service.get_task_status(task_id)
+    if status.get("status") == TASK_CANCELLED:
+        raise UserCancelledTask("Task cancelled by user/admin")
 
 
 class ProgressReporter:
@@ -81,12 +91,23 @@ async def _send_video_with_retry(bot: Bot, chat_id: int, video_path: Path) -> No
                     connect_timeout=60,
                     pool_timeout=60,
                 )
-            return
+            break
         except TelegramError as exc:
             last_error = exc
             logger.warning("Send video attempt %s/%s failed: %s", attempt, settings.telegram_send_max_retries, exc)
             await asyncio.sleep(min(attempt * 3, 12))
-    raise RuntimeError(f"Failed to send final video: {last_error}")
+    else:
+        raise RuntimeError(f"Failed to send final video: {last_error}")
+
+    # The follow-up message is helpful but should never cause duplicate video sends.
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text='ចុច Button "Start" ខាងក្រោមដើម្បីបន្ត។',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Start", callback_data="start_dubbing")]]),
+        )
+    except TelegramError as exc:
+        logger.warning("Could not send completion Start button: %s", exc)
 
 
 def _require_payload_path(payload: Dict[str, Any], name: str) -> Path:
@@ -134,9 +155,11 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
         await update_task_status(task_id, TASK_PROCESSING, 15, mark_started=True)
         await progress.edit(15, f"⚙️ កំពុងរៀបចំឯកសារ...\n\n{percent_line(15)}", force=True)
 
+        await _raise_if_cancelled(task_id)
         subtitles = validate_srt_file(srt_path, video_duration)
         await progress.edit(20, f"📝 កំពុងអាន Subtitle SRT...\n\n{percent_line(20)}", force=True)
 
+        await _raise_if_cancelled(task_id)
         await redis_service.refresh_task_lock(task_id)
         dubbed_audio = await build_dubbed_audio(
             task_id=task_id,
@@ -144,9 +167,11 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
             voice=voice,
             video_duration=video_duration,
             progress_callback=progress.edit,
+            cancel_check=lambda: _raise_if_cancelled(task_id),
         )
         await progress.edit(78, f"🔊 កំពុងរៀបចំសម្លេងចុងក្រោយ...\n\n{percent_line(78)}", force=True)
 
+        await _raise_if_cancelled(task_id)
         await redis_service.refresh_task_lock(task_id)
         await merge_audio_with_video(video_path, dubbed_audio, output_path)
         await progress.edit(92, f"🎬 កំពុងបញ្ចូលសម្លេងទៅក្នុងវីដេអូ...\n\n{percent_line(92)}", force=True)
@@ -164,6 +189,11 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
             if audio_dir.exists():
                 shutil.rmtree(audio_dir, ignore_errors=True)
         await log_db("info", "worker", "Task completed", {"task_id": task_id, "user": telegram_user_id})
+    except UserCancelledTask as exc:
+        await update_task_status(task_id, TASK_CANCELLED, progress=0, error_message=str(exc), mark_finished=True)
+        await redis_service.set_user_state(telegram_user_id, STATE_IDLE)
+        await redis_service.delete(f"user:{telegram_user_id}:task")
+        await log_db("info", "worker", "Task cancelled during processing", {"task_id": task_id, "user": telegram_user_id})
     except Exception as exc:
         err = str(exc)
         recovery = classify_error(exc)

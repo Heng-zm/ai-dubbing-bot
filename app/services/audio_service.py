@@ -163,6 +163,7 @@ async def build_dubbed_audio(
     voice: str,
     video_duration: float,
     progress_callback=None,
+    cancel_check=None,
 ) -> Path:
     """Generate all TTS clips and build a single timed dubbed WAV track."""
     task_audio_dir = settings.audio_dir / task_id
@@ -175,6 +176,8 @@ async def build_dubbed_audio(
     multi_voice_enabled = bool(runtime.get("multi_voice_enabled", True))
 
     for idx, item in enumerate(subtitles, start=1):
+        if cancel_check:
+            await cancel_check()
         if item.start > cursor + 0.02:
             gap_path = task_audio_dir / f"gap_{idx:04d}.wav"
             await create_silence(gap_path, item.start - cursor)
@@ -184,6 +187,8 @@ async def build_dubbed_audio(
         raw_path = task_audio_dir / f"tts_raw_{idx:04d}_{abs(hash(segment_voice)) % 10000}.mp3"
         fitted_path = task_audio_dir / f"tts_fit_{idx:04d}.wav"
         await generate_tts_audio(item.text, segment_voice, raw_path)
+        if cancel_check:
+            await cancel_check()
         await fit_audio_to_duration(raw_path, fitted_path, item.duration)
         timeline_files.append(fitted_path)
         cursor = max(cursor, item.end)

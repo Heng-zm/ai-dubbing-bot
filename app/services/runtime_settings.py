@@ -56,6 +56,14 @@ SETTING_DEFS: dict[str, SettingDef] = {
     ),
     "multi_voice_enabled": SettingDef("multi_voice_enabled", "Multi voice per character", "bool", True),
     "show_processing_estimate": SettingDef("show_processing_estimate", "Processing time estimate", "bool", True),
+    "auto_srt_fixer_enabled": SettingDef("auto_srt_fixer_enabled", "Auto Subtitle Fixer", "bool", True),
+    "auto_srt_fixer_max_overlap_seconds": SettingDef(
+        "auto_srt_fixer_max_overlap_seconds", "Auto SRT max overlap fix", "float", 1.2, "seconds", 0.0, 5.0
+    ),
+    "auto_srt_fixer_max_video_overrun_seconds": SettingDef(
+        "auto_srt_fixer_max_video_overrun_seconds", "Auto SRT max video overrun fix", "float", 2.0, "seconds", 0.0, 10.0
+    ),
+    "auto_srt_fixer_min_gap_ms": SettingDef("auto_srt_fixer_min_gap_ms", "Auto SRT min gap", "int", 50, "milliseconds", 0, 1000),
 }
 
 CACHE_KEY = "bot:runtime_settings"

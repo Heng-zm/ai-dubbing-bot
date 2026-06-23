@@ -23,6 +23,7 @@ from app.services.logger_service import log_db, logger
 from app.services.redis_service import redis_service
 from app.services.runtime_settings import runtime_settings
 from app.services.srt_parser import SubtitleItem, validate_srt_file
+from app.services.subtitle_fixer import FixReport, fix_srt_file, format_fix_report_khmer
 from app.services.supabase_service import supabase_service
 from app.services.task_service import update_task_status
 from app.services.voice_service import summarize_character_voices
@@ -45,6 +46,37 @@ from app.utils.text_utils import truncate
 from app.utils.time_utils import seconds_to_readable
 from app.utils.telegram_ui import percent_line, status_emoji, status_label, step_title
 
+
+
+
+def _format_srt_instruction_message() -> str:
+    """Return the improved Khmer instruction shown after the video is accepted."""
+    gemini_prompt = (
+        "Transcribe this video into a valid SRT subtitle file and translate all dialogue into natural Khmer. "
+        "Keep accurate timestamps, short readable subtitle lines, correct SRT numbering, and output only the final .srt content."
+    )
+    return (
+        "✅ វីដេអូបានទទួលហើយ\n\n"
+        f"{step_title(3, 4, 'ផ្ញើឯកសារ SRT')}\n\n"
+        "សូមផ្ញើឯកសារ Subtitle .srt ជា Document។\n"
+        "បន្ទាប់ពីផ្ញើ Bot នឹងបង្ហាញ Preview ឱ្យពិនិត្យ មុនចាប់ផ្តើមដំណើរការ។\n\n"
+        "📌 ប្រសិនបើអ្នកមិនទាន់មានឯកសារ SRT៖\n"
+        "1️⃣ ចូលទៅ Gemini: https://gemini.google.com/app\n"
+        "2️⃣ Upload វីដេអូរបស់អ្នកទៅ Gemini\n"
+        "3️⃣ Copy prompt ខាងក្រោម ហើយ Paste ចូល Gemini៖\n\n"
+        f"{gemini_prompt}\n\n"
+        "4️⃣ Copy លទ្ធផល SRT ពី Gemini → Save ជា file .srt\n"
+        "5️⃣ ផ្ញើ file .srt នោះមក Bot ជា Document។"
+    )
+
+
+def _srt_instruction_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🌐 បើក Gemini", url="https://gemini.google.com/app")],
+            [InlineKeyboardButton("❌ បោះបង់", callback_data=f"dubbing:cancel:{task_id}")],
+        ]
+    )
 
 def _khmer_video_error(code: str) -> str:
     runtime = runtime_settings.cached()
@@ -102,7 +134,7 @@ def retry_keyboard(task_id: str) -> InlineKeyboardMarkup:
         ]
     )
 
-def _format_srt_preview(items: list[SubtitleItem], video_duration: float, voice: str, queue_count: int) -> str:
+def _format_srt_preview(items: list[SubtitleItem], video_duration: float, voice: str, queue_count: int, fix_report: FixReport | None = None) -> str:
     subtitle_count = len(items)
     last_end = max((item.end for item in items), default=0.0)
     total_chars = sum(len(item.text) for item in items)
@@ -129,6 +161,11 @@ def _format_srt_preview(items: list[SubtitleItem], video_duration: float, voice:
 
     timing_ok = "ត្រឹមត្រូវ ✅" if last_end <= video_duration + 0.2 else "លើសវីដេអូ ⚠️"
     estimate_block = f"\n⏱ ពេលវេលាប៉ាន់ស្មាន\n{estimate_text}\n" if estimate_text else ""
+    fixer_block = ""
+    if fix_report is not None:
+        fixer_title = "🛠 Auto Subtitle Fixer"
+        fixer_body = format_fix_report_khmer(fix_report)
+        fixer_block = f"\n{fixer_title}\n{fixer_body}\n"
     return (
         f"{step_title(4, 4, 'ពិនិត្យ Subtitle Preview')}\n\n"
         "សូមពិនិត្យព័ត៌មានខាងក្រោម មុនចាប់ផ្តើមដំណើរការ។\n\n"
@@ -139,7 +176,8 @@ def _format_srt_preview(items: list[SubtitleItem], video_duration: float, voice:
         f"• សម្លេង Default: {voice_label}\n"
         f"• តួអក្សរសរុប: {total_chars}\n"
         f"• Queue រំពឹងទុក: ជួរទី {estimated_position}\n"
-        f"{estimate_block}\n"
+        f"{estimate_block}"
+        f"{fixer_block}\n"
         "👥 Multi Voice Per Character\n"
         f"{character_text}\n\n"
         "🔎 Preview 3 បន្ទាត់ដំបូង\n"
@@ -170,6 +208,17 @@ def _user_can_access_task(task: dict[str, Any] | None, telegram_user_id: int) ->
     if int(task.get("telegram_user_id") or 0) == int(telegram_user_id):
         return True
     return telegram_user_id in settings.admin_ids
+
+
+def _already_started_text(status: str, progress: str | int = 0, queue_position: int | None = None) -> str:
+    position = f"\n⏳ Queue: ជួរទី {queue_position}" if queue_position else ""
+    return (
+        "ℹ️ Task នេះបានចាប់ផ្តើមរួចហើយ។\n\n"
+        f"📌 Status: {status_label(status)}\n"
+        f"📊 Progress: {percent_line(progress)}"
+        f"{position}\n\n"
+        "ប្រើ /status ដើម្បីមើលស្ថានភាពចុងក្រោយ។"
+    )
 
 
 async def _enqueue_task(
@@ -279,7 +328,11 @@ async def _handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             },
         )
         await redis_service.set_task_status(task_id, TASK_WAITING_SRT, 10)
-        await progress_msg.edit_text(f"✅ វីដេអូបានទទួលហើយ\n\n{step_title(3, 4, 'ផ្ញើឯកសារ SRT')}\n\nសូមផ្ញើឯកសារ Subtitle .srt ជា Document។\nបន្ទាប់ពីផ្ញើ Bot នឹងបង្ហាញ Preview មុនដំណើរការ។")
+        await progress_msg.edit_text(
+            _format_srt_instruction_message(),
+            reply_markup=_srt_instruction_keyboard(task_id),
+            disable_web_page_preview=True,
+        )
     except ValueError as exc:
         delete_file(video_path)
         await progress_msg.edit_text(_khmer_video_error(str(exc)))
@@ -327,6 +380,22 @@ async def _handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         srt = await download_srt(message, context.bot, task_id)
         srt_path = srt["path"]
+        runtime = await runtime_settings.load()
+        fix_report: FixReport | None = None
+
+        if bool(runtime.get("auto_srt_fixer_enabled", True)):
+            try:
+                fix_report = fix_srt_file(
+                    Path(srt_path),
+                    video_duration=video_duration,
+                    max_overlap_seconds=float(runtime.get("auto_srt_fixer_max_overlap_seconds", 1.2)),
+                    max_video_overrun_seconds=float(runtime.get("auto_srt_fixer_max_video_overrun_seconds", 2.0)),
+                    min_gap_seconds=float(runtime.get("auto_srt_fixer_min_gap_ms", 50)) / 1000.0,
+                )
+            except ValueError:
+                # Let the normal validator produce the user-facing error code.
+                fix_report = None
+
         items = validate_srt_file(Path(srt_path), video_duration)
         queue_count = await redis_service.queue_count()
         voice = meta.get("voice") or await redis_service.get_user_voice(user.id) or ""
@@ -350,13 +419,15 @@ async def _handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "subtitle_last_end": max(item.end for item in items),
                 "subtitle_chars": sum(len(item.text) for item in items),
                 "detected_characters": ", ".join(sorted({str(item.character_label) for item in items if item.character_label})),
+                "auto_srt_fixed": "true" if fix_report and fix_report.fixed else "false",
+                "auto_srt_fixes": "; ".join((fix_report.fixes if fix_report else [])[:8]),
             },
         )
         await redis_service.set_task_status(task_id, TASK_WAITING_SRT, 12)
         await redis_service.set_user_state(user.id, STATE_WAITING_CONFIRM)
 
         await message.reply_text(
-            _format_srt_preview(items, video_duration, voice, queue_count),
+            _format_srt_preview(items, video_duration, voice, queue_count, fix_report),
             reply_markup=_confirm_keyboard(task_id),
         )
     except ValueError as exc:
@@ -400,6 +471,15 @@ async def _confirm_task(query, telegram_user_id: int) -> None:
     task = await supabase_service.get_task(task_id)
     if not _user_can_access_task(task, telegram_user_id):
         await query.edit_message_text("អ្នកមិនមានសិទ្ធិដំណើរការ Task នេះទេ។")
+        return
+
+    task_status = str((task or {}).get("status") or "")
+    redis_status = await redis_service.get_task_status(task_id)
+    effective_status = redis_status.get("status") or task_status
+    if effective_status in {TASK_QUEUED, TASK_PROCESSING, TASK_COMPLETED}:
+        queue_position = await redis_service.queue_position(task_id)
+        progress = redis_status.get("progress") or (task or {}).get("progress") or 0
+        await query.edit_message_text(_already_started_text(effective_status, progress, queue_position))
         return
 
     meta = await redis_service.get_task_meta(task_id)
@@ -499,6 +579,7 @@ async def _cancel_task_from_button(query, telegram_user_id: int, task_id: str) -
     for path in (meta.get("srt_path"),):
         if path:
             delete_file(str(path))
+    await redis_service.remove_task_from_queue(task_id)
     await update_task_status(task_id, TASK_CANCELLED, progress=0, error_message="Cancelled by user before processing", mark_finished=True)
     await redis_service.set_user_state(telegram_user_id, STATE_IDLE)
     await redis_service.delete(f"user:{telegram_user_id}:task")
@@ -525,6 +606,7 @@ async def _retry_failed_task(query, telegram_user_id: int, task_id: str) -> None
 
     voice = str((task or {}).get("voice") or await redis_service.get_user_voice(telegram_user_id) or "")
     video_duration = float((task or {}).get("video_duration") or 0)
+    await redis_service.remove_task_from_queue(task_id)
     await supabase_service.update_task(
         task_id,
         {
@@ -611,6 +693,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not task_id:
         await message.reply_text("អ្នកមិនមាន Task សម្រាប់បោះបង់ទេ។")
         return
+    await redis_service.remove_task_from_queue(task_id)
     await update_task_status(task_id, TASK_CANCELLED, progress=0, error_message="Cancelled by user", mark_finished=True)
     await redis_service.set_user_state(user.id, STATE_IDLE)
     await redis_service.delete(f"user:{user.id}:task")

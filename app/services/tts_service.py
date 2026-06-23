@@ -191,6 +191,8 @@ async def generate_tts_audio(text: str, voice: str, output_path: Path) -> Path:
     for provider_name in providers:
         for attempt in range(1, settings.tts_max_retries + 1):
             try:
+                # Remove partial files from previous failed attempts before retrying.
+                output_path.unlink(missing_ok=True)
                 await _generate_once(provider_name, clean_text, voice, output_path)
                 if output_path.exists() and output_path.stat().st_size > 0:
                     return output_path

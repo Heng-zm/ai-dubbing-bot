@@ -47,6 +47,10 @@ SETTING_UI_LABELS = {
     "watermark_position": "📍 Watermark position",
     "multi_voice_enabled": "👥 Multi voice",
     "show_processing_estimate": "⏱ Time estimate",
+    "auto_srt_fixer_enabled": "🛠 Auto SRT fixer",
+    "auto_srt_fixer_max_overlap_seconds": "↔️ Fix overlap up to",
+    "auto_srt_fixer_max_video_overrun_seconds": "⏳ Fix video overrun up to",
+    "auto_srt_fixer_min_gap_ms": "📏 Subtitle min gap",
 }
 
 
@@ -63,12 +67,20 @@ def _setting_value(key: str, value: Any) -> str:
         return f"{display_value(key, value)}s"
     if key in {"max_video_size_mb", "max_srt_size_mb"}:
         return f"{display_value(key, value)}MB"
+    if key in {"auto_srt_fixer_max_overlap_seconds", "auto_srt_fixer_max_video_overrun_seconds"}:
+        return f"{display_value(key, value)}s"
+    if key == "auto_srt_fixer_min_gap_ms":
+        return f"{display_value(key, value)}ms"
     return display_value(key, value)
 
 SETTING_ORDER = [
     "max_video_duration_seconds",
     "max_video_size_mb",
     "max_srt_size_mb",
+    "auto_srt_fixer_enabled",
+    "auto_srt_fixer_max_overlap_seconds",
+    "auto_srt_fixer_max_video_overrun_seconds",
+    "auto_srt_fixer_min_gap_ms",
     "tts_provider",
     "tts_cache_enabled",
     "keep_original_audio",

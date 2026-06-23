@@ -148,12 +148,18 @@ class RedisService:
     async def enqueue(self, payload: Dict[str, Any]) -> int:
         """Push a job into the queue and return its 1-based position after enqueue.
 
-        The position is a helpful user-facing estimate. It can quickly change when
-        an in-process worker pops the job, so /status also calculates the live
-        position by scanning pending queue items.
+        Duplicate Telegram callback taps can happen. Before pushing, scan the
+        pending list for the same task_id and return the existing queue position
+        instead of enqueuing a duplicate job.
         """
         redis = await self.connect()
         queue_key = await self._queue_key()
+        task_id = str(payload.get("task_id") or "")
+        if task_id:
+            existing_position = await self.queue_position(task_id)
+            if existing_position:
+                return existing_position
+
         enriched = dict(payload)
         enriched.setdefault("enqueued_at", datetime.now(timezone.utc).isoformat())
         await redis.rpush(queue_key, json.dumps(enriched, ensure_ascii=False))
@@ -178,6 +184,34 @@ class RedisService:
             if isinstance(payload, dict) and str(payload.get("task_id")) == str(task_id):
                 return index
         return None
+
+
+    async def remove_task_from_queue(self, task_id: str) -> int:
+        """Remove all pending queue entries for one task and return removed count.
+
+        This prevents cancelled tasks or duplicate button taps from staying in the
+        pending list. It scans the Redis list conservatively because the queue is
+        intentionally small in single-service Render mode.
+        """
+        redis = await self.connect()
+        queue_key = await self._queue_key()
+        try:
+            items = await redis.lrange(queue_key, 0, -1)
+        except RedisError:
+            return 0
+        removed = 0
+        for raw in items:
+            try:
+                payload = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict) and str(payload.get("task_id")) == str(task_id):
+                removed += int(await redis.lrem(queue_key, 0, raw))
+        return removed
+
+    async def is_terminal_task_status(self, task_id: str) -> bool:
+        status = (await self.get_task_status(task_id)).get("status")
+        return status in {"completed", "failed", "cancelled"}
 
     async def purge_queue(self) -> int:
         """Delete all pending jobs from the Redis queue and return the previous queue size.

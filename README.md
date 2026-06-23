@@ -685,3 +685,124 @@ Or rerun the full schema:
 ```text
 database/supabase_schema.sql
 ```
+
+## v1.5.1 update: Better SRT instruction with Gemini helper
+
+After the bot accepts a video, the SRT step now shows clearer Khmer instructions and helps users create an SRT file with Gemini if they do not already have subtitles.
+
+User-facing message includes:
+
+```text
+✅ វីដេអូបានទទួលហើយ
+
+ជំហាន 3/4 • ផ្ញើឯកសារ SRT
+
+សូមផ្ញើឯកសារ Subtitle .srt ជា Document។
+បន្ទាប់ពីផ្ញើ Bot នឹងបង្ហាញ Preview ឱ្យពិនិត្យ មុនចាប់ផ្តើមដំណើរការ។
+
+📌 ប្រសិនបើអ្នកមិនទាន់មានឯកសារ SRT៖
+1️⃣ ចូលទៅ Gemini: https://gemini.google.com/app
+2️⃣ Upload វីដេអូរបស់អ្នកទៅ Gemini
+3️⃣ Copy prompt ខាងក្រោម ហើយ Paste ចូល Gemini៖
+
+Transcribe this video into a valid SRT subtitle file and translate all dialogue into natural Khmer. Keep accurate timestamps, short readable subtitle lines, correct SRT numbering, and output only the final .srt content.
+
+4️⃣ Copy លទ្ធផល SRT ពី Gemini → Save ជា file .srt
+5️⃣ ផ្ញើ file .srt នោះមក Bot ជា Document។
+```
+
+Inline buttons:
+
+```text
+[ 🌐 បើក Gemini ]
+[ ❌ បោះបង់ ]
+```
+
+## Update: Auto Subtitle Fixer
+
+This version adds an automatic SRT repair step before the subtitle preview screen.
+
+When a user uploads `.srt`, the bot will try to safely fix common problems:
+
+- Markdown/code fence output from Gemini, for example code fences like `srt` blocks
+- Missing or wrong subtitle numbering
+- Missing milliseconds such as `00:00:01 --> 00:00:03`
+- Dot milliseconds such as `00:00:01.500`
+- Extra blank lines and messy spacing
+- Missing blank line between subtitle blocks
+- Small subtitle timing overlaps
+- Subtitle timing that slightly exceeds video duration
+- Very short subtitle duration
+
+The bot does **not** rewrite dialogue text. It only normalizes SRT structure/timing.
+
+After upload, the preview screen shows an **🛠 Auto Subtitle Fixer** section. If fixes were applied, the user can review the summary before clicking `✅ ចាប់ផ្តើម Dubbing`.
+
+### Auto Subtitle Fixer settings
+
+Admins can configure it inside Telegram:
+
+```text
+/admin → ⚙️ Settings
+```
+
+New settings:
+
+```text
+🛠 Auto SRT fixer: On / Off
+↔️ Fix overlap up to: 1.2s
+⏳ Fix video overrun up to: 2.0s
+📏 Subtitle min gap: 50ms
+```
+
+Run this migration once in Supabase SQL Editor:
+
+```text
+database/migrations/004_auto_subtitle_fixer_settings.sql
+```
+
+Then redeploy Render:
+
+```text
+Manual Deploy → Clear build cache & deploy
+```
+
+## 2026-06-23 Bug Fixes and Performance Update
+
+This package includes a stability pass on top of the Auto Subtitle Fixer build.
+
+### Fixed
+
+- Prevented duplicate queue jobs when users tap the confirmation button multiple times.
+- Cancel now removes pending queue entries instead of leaving cancelled jobs waiting in Redis.
+- Retry now removes old pending entries before re-queueing a failed task.
+- Restored the post-completion `Start` button after the final video is sent.
+- The completion Start button is now sent as a best-effort follow-up message so Telegram retry logic will not resend duplicate videos.
+- Worker now checks for cancellation between major stages before continuing expensive ffmpeg/TTS work.
+- TTS retry logic now removes partial/empty files before retrying.
+- Auto Subtitle Fixer now accepts more Gemini timestamp styles, including `to`, `until`, `→`, `➡`, `1.`, and `1)` numbering.
+
+### Performance Improvements
+
+- Queue scanning avoids duplicate processing while keeping single-service Render deployment simple.
+- Cancelled tasks are removed from the pending list immediately, improving queue position accuracy.
+- Progress updates remain throttled to reduce Telegram edit-message rate limits.
+- Cached TTS files are still reused for repeated subtitle lines.
+
+### Deployment Note
+
+No new Supabase migration is required for this update if you already ran migrations 001-004.
+Redeploy on Render with:
+
+```bash
+python -m app.main
+```
+
+Recommended Render env:
+
+```env
+IN_PROCESS_WORKER=true
+ENABLE_HEALTH_SERVER=true
+CLEAR_STALE_QUEUE_ON_START=true
+KEEP_FAILED_FILES=true
+```
