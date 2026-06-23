@@ -31,7 +31,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔄 Running Tasks", callback_data="admin:running")],
             [InlineKeyboardButton("📢 Broadcast Message", callback_data="admin:broadcast")],
             [InlineKeyboardButton("⚙️ Settings", callback_data="admin:settings"), InlineKeyboardButton("🧹 Clean Temp Files", callback_data="admin:clean")],
-            [InlineKeyboardButton("📝 Recent Logs", callback_data="admin:logs")],
+            [InlineKeyboardButton("🧾 Clear Queue", callback_data="admin:clear_queue"), InlineKeyboardButton("📝 Recent Logs", callback_data="admin:logs")],
         ]
     )
 
@@ -81,6 +81,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif action == "clean":
         deleted = clean_temp_older_than(hours=settings.cleanup_old_temp_hours)
         await query.edit_message_text(f"បានសម្អាត temp files ចំនួន {deleted} files។", reply_markup=back_keyboard())
+    elif action == "clear_queue":
+        count = await redis_service.purge_queue()
+        await query.edit_message_text(f"បានសម្អាត Redis queue ចំនួន {count} job(s)។", reply_markup=back_keyboard())
     elif action == "logs":
         await _show_logs(query)
     elif action == "broadcast_confirm":
@@ -172,6 +175,7 @@ async def _show_settings(query) -> None:
         f"Worker count: {settings.in_process_worker_count}\n"
         f"Clean success files: {settings.clean_success_files}\n"
         f"Keep failed files: {settings.keep_failed_files}\n"
+        f"Clear queue on startup: {settings.clear_stale_queue_on_start}\n"
         f"Queue key: {settings.redis_queue_key}"
     )
     await _safe_edit(query, text, back_keyboard())

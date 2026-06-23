@@ -288,45 +288,6 @@ Starting AI Dubbing Bot with polling
 - Final dubbed audio is normalized.
 - Final video duration is kept aligned with original video.
 
-
-
-## Render Web Service port fix
-
-If Render shows:
-
-```text
-==> No open ports detected, continuing to scan...
-```
-
-You deployed the Telegram polling bot as a Render **Web Service**. Web Services must bind an HTTP port even though Telegram polling bots normally do not need one. This project includes a tiny built-in health server for that.
-
-Set these environment variables on Render:
-
-```env
-ENABLE_HEALTH_SERVER=true
-HEALTH_SERVER_HOST=0.0.0.0
-# Do not set PORT manually unless you know why. Render provides PORT automatically.
-IN_PROCESS_WORKER=true
-```
-
-The app now starts the health server before Telegram, Redis, and Supabase startup checks, so Render can detect the open port immediately. The health endpoints are:
-
-```text
-/
-/health
-/healthz
-/ready
-```
-
-Expected log:
-
-```text
-Health server started on 0.0.0.0:10000
-Starting AI Dubbing Bot with polling
-```
-
-If you deploy as a Render **Background Worker** instead of Web Service, this port server is not required.
-
 ## Common errors and fixes
 
 ### `Missing required binary: ffmpeg, ffprobe`
@@ -470,25 +431,66 @@ The Khmer voice names remain the same:
 km-KH-PisethNeural
 km-KH-SreymomNeural
 ```
-## Hotfix: Supabase PGRST204 `updated_at` schema cache error
 
-If Render logs show:
+## v1.2.0 update: queue position, SRT preview, retry failed tasks
+
+This build adds three production UX features:
+
+### 1. Queue position for users
+
+After the user confirms the SRT preview, the bot enqueues the job and shows the estimated position:
 
 ```text
-Could not find the 'updated_at' column of 'dubbing_tasks' in the schema cache
+Task របស់អ្នកត្រូវបានដាក់ចូល Queue ហើយ ✅
+ការងាររបស់អ្នកស្ថិតនៅជួរទី 2។
 ```
 
-Run this migration in Supabase SQL Editor:
+Users can also run:
 
 ```text
-database/migrations/001_add_updated_at_and_reload_cache.sql
+/status
 ```
 
-This adds the missing `updated_at` columns, recreates the update triggers, and runs:
+When the task is still pending in Redis, `/status` shows the live queue position.
 
-```sql
-notify pgrst, 'reload schema';
+### 2. Subtitle preview before processing
+
+The bot no longer starts processing immediately after SRT upload. It first validates the SRT and shows:
+
+- subtitle count
+- last subtitle timing
+- video duration
+- selected Khmer voice
+- total character count
+- first subtitle preview lines
+- expected queue position
+
+User buttons:
+
+```text
+[ ចាប់ផ្តើម Dubbing ✅ ]
+[ ផ្លាស់ប្តូរ SRT 🔁 ]
+[ បោះបង់ ❌ ]
 ```
 
-The code also contains a safe fallback: if Supabase still has a stale schema cache, writes retry without the optional `updated_at` field so users can continue uploading SRT files while the migration/cache refresh completes.
+This prevents wasting TTS/ffmpeg time when the wrong SRT file is uploaded.
 
+### 3. Resume failed task button
+
+When processing fails and `KEEP_FAILED_FILES=true`, the bot shows:
+
+```text
+[ ព្យាយាមម្តងទៀត 🔄 ]
+[ ចាប់ផ្តើមថ្មី 🎬 ]
+```
+
+Retry works when the original video and SRT temp files still exist. If Render restarted/redeployed and the temp files disappeared, the bot will safely tell the user to upload again.
+
+Recommended production env:
+
+```env
+KEEP_FAILED_FILES=true
+CLEAR_STALE_QUEUE_ON_START=true
+IN_PROCESS_WORKER=true
+IN_PROCESS_WORKER_COUNT=1
+```

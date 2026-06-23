@@ -3,6 +3,7 @@
 STATE_IDLE = "idle"
 STATE_WAITING_VIDEO = "waiting_video"
 STATE_WAITING_SRT = "waiting_srt"
+STATE_WAITING_CONFIRM = "waiting_confirm"
 STATE_PROCESSING = "processing"
 STATE_ADMIN_BROADCAST_TEXT = "admin_broadcast_text"
 

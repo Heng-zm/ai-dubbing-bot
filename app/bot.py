@@ -8,7 +8,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 
 from app.config import settings
 from app.handlers.admin import admin_callback, admin_command, handle_admin_text
-from app.handlers.dubbing import cancel_command, handle_video_or_document, status_command
+from app.handlers.dubbing import cancel_command, dubbing_callback, handle_video_or_document, status_command
 from app.handlers.errors import error_handler
 from app.handlers.start import start_command, start_dubbing_callback, voice_callback
 from app.services.health_server import start_health_server, stop_health_server
@@ -25,6 +25,10 @@ async def _post_init(application: Application) -> None:
         logger.info("Startup temp cleanup deleted %s old files", deleted)
 
     redis_ok = await redis_service.ping()
+    if redis_ok and settings.clear_stale_queue_on_start:
+        purged = await redis_service.purge_queue()
+        if purged:
+            logger.warning("Startup cleared %s stale Redis queue job(s). Local temp files are not durable across Render restarts.", purged)
     supabase_ok = await supabase_service.health_check()
     logger.info("Startup checks | Redis=%s | Supabase=%s", redis_ok, supabase_ok)
     if not redis_ok:
@@ -89,6 +93,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CallbackQueryHandler(start_dubbing_callback, pattern="^start_dubbing$"))
     application.add_handler(CallbackQueryHandler(voice_callback, pattern="^voice:"))
+    application.add_handler(CallbackQueryHandler(dubbing_callback, pattern="^dubbing:"))
     application.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin:"))
     application.add_handler(MessageHandler(filters.VIDEO | filters.Document.ALL, handle_video_or_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))

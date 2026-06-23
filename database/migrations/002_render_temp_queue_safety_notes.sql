@@ -1,0 +1,4 @@
+-- No database change is required for this hotfix.
+-- This file documents the Render single-service queue safety update.
+-- Pending Redis jobs can reference local temp files that disappear after redeploy/restart.
+-- The application now supports CLEAR_STALE_QUEUE_ON_START=true and skips stale tasks safely.

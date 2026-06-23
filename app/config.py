@@ -94,6 +94,7 @@ class Settings:
     keep_failed_files: bool
     cleanup_on_start: bool
     cleanup_old_temp_hours: int
+    clear_stale_queue_on_start: bool
 
     tts_provider: str
     tts_cache_enabled: bool
@@ -184,6 +185,7 @@ settings = Settings(
     keep_failed_files=_get_bool("KEEP_FAILED_FILES", True),
     cleanup_on_start=_get_bool("CLEANUP_ON_START", False),
     cleanup_old_temp_hours=_get_int("CLEANUP_OLD_TEMP_HOURS", 24),
+    clear_stale_queue_on_start=_get_bool("CLEAR_STALE_QUEUE_ON_START", True),
     tts_provider=_safe_tts_provider(),
     tts_cache_enabled=_get_bool("TTS_CACHE_ENABLED", True),
     tts_max_retries=max(1, _get_int("TTS_MAX_RETRIES", 3)),

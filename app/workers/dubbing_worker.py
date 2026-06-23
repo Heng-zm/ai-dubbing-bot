@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
 from app.config import settings
@@ -21,6 +21,19 @@ from app.services.task_service import update_task_status
 from app.services.video_service import merge_audio_with_video
 from app.states import STATE_IDLE, TASK_COMPLETED, TASK_FAILED, TASK_PROCESSING
 from app.utils.file_utils import check_ffmpeg_available, clean_task_files
+
+
+
+def _retry_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("ព្យាយាមម្តងទៀត 🔄", callback_data=f"dubbing:retry:{task_id}")],
+            [InlineKeyboardButton("ចាប់ផ្តើមថ្មី 🎬", callback_data="start_dubbing")],
+        ]
+    )
+
+class StaleTaskFileError(RuntimeError):
+    """Raised when a queued job points to a local temp file that no longer exists."""
 
 
 class ProgressReporter:
@@ -84,10 +97,13 @@ async def _send_video_with_retry(bot: Bot, chat_id: int, video_path: Path) -> No
 def _require_payload_path(payload: Dict[str, Any], name: str) -> Path:
     value = payload.get(name)
     if not value:
-        raise RuntimeError(f"Missing task payload path: {name}")
+        raise StaleTaskFileError(f"Missing task payload path: {name}")
     path = Path(str(value))
     if not path.exists():
-        raise RuntimeError(f"Task file missing: {name}={path}")
+        raise StaleTaskFileError(
+            f"Task file missing: {name}={path}. "
+            "This usually happens after a Render redeploy/restart because temp files are local and not durable."
+        )
     return path
 
 
@@ -154,25 +170,30 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
         await log_db("info", "worker", "Task completed", {"task_id": task_id, "user": telegram_user_id})
     except Exception as exc:
         err = str(exc)
+        is_stale_file = isinstance(exc, StaleTaskFileError)
+        user_message = (
+            "Task ចាស់នេះរកឯកសារវីដេអូ/SRT មិនឃើញទេ។ សូមផ្ញើវីដេអូ និង SRT ម្តងទៀតដោយចុច /start។"
+            if is_stale_file
+            else "សូមទោស មានបញ្ហាក្នុងការដំណើរការ។ សូមព្យាយាមម្តងទៀត។"
+        )
         await update_task_status(task_id, TASK_FAILED, error_message=err, mark_finished=True)
         await log_db(
-            "error",
+            "warning" if is_stale_file else "error",
             "worker",
-            "Task failed",
+            "Stale task skipped" if is_stale_file else "Task failed",
             {"task_id": task_id, "error": err, "traceback": traceback.format_exc()},
         )
+        retry_markup = _retry_keyboard(task_id) if (settings.keep_failed_files and not is_stale_file) else None
         try:
             if progress_message_id:
                 await bot.edit_message_text(
                     chat_id=chat_id,
                     message_id=progress_message_id,
-                    text="សូមទោស មានបញ្ហាក្នុងការដំណើរការ។ សូមព្យាយាមម្តងទៀត។",
+                    text=user_message,
+                    reply_markup=retry_markup,
                 )
             else:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text="សូមទោស មានបញ្ហាក្នុងការដំណើរការ។ សូមព្យាយាមម្តងទៀត។",
-                )
+                await bot.send_message(chat_id=chat_id, text=user_message, reply_markup=retry_markup)
         except Exception:
             pass
         await redis_service.set_user_state(telegram_user_id, STATE_IDLE)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from redis.asyncio import Redis
@@ -136,9 +137,51 @@ class RedisService:
         if current == owner:
             await redis.delete(key)
 
-    async def enqueue(self, payload: Dict[str, Any]) -> None:
+    async def enqueue(self, payload: Dict[str, Any]) -> int:
+        """Push a job into the queue and return its 1-based position after enqueue.
+
+        The position is a helpful user-facing estimate. It can quickly change when
+        an in-process worker pops the job, so /status also calculates the live
+        position by scanning pending queue items.
+        """
         redis = await self.connect()
-        await redis.rpush(settings.redis_queue_key, json.dumps(payload, ensure_ascii=False))
+        enriched = dict(payload)
+        enriched.setdefault("enqueued_at", datetime.now(timezone.utc).isoformat())
+        await redis.rpush(settings.redis_queue_key, json.dumps(enriched, ensure_ascii=False))
+        return int(await redis.llen(settings.redis_queue_key))
+
+    async def queue_position(self, task_id: str) -> Optional[int]:
+        """Return the current 1-based pending queue position for a task.
+
+        Returns None when the task is already being processed, completed, failed,
+        cancelled, or not present in the pending Redis list.
+        """
+        redis = await self.connect()
+        try:
+            items = await redis.lrange(settings.redis_queue_key, 0, -1)
+        except RedisError:
+            return None
+        for index, raw in enumerate(items, start=1):
+            try:
+                payload = json.loads(raw)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, dict) and str(payload.get("task_id")) == str(task_id):
+                return index
+        return None
+
+    async def purge_queue(self) -> int:
+        """Delete all pending jobs from the Redis queue and return the previous queue size.
+
+        On Render single-service deployments, queued jobs can point to local temp files
+        that disappear after redeploy/restart. Clearing pending jobs on startup prevents
+        stale jobs from failing repeatedly.
+        """
+        redis = await self.connect()
+        count = int(await redis.llen(settings.redis_queue_key))
+        if count:
+            await redis.delete(settings.redis_queue_key)
+        return count
 
     async def dequeue(self, timeout: int | None = None) -> Optional[Dict[str, Any]]:
         redis = await self.connect()
