@@ -230,6 +230,32 @@ class RedisService:
         status = (await self.get_task_status(task_id)).get("status")
         return status in {"completed", "failed", "cancelled"}
 
+    async def scan_task_statuses(self, status_filter: str | None = None) -> list[dict[str, Any]]:
+        """Return task status rows from Redis using SCAN, not KEYS.
+
+        Used on startup to recover tasks that were interrupted by a Render
+        restart while ffmpeg/Telegram upload was running.
+        """
+        redis = await self.connect()
+        rows: list[dict[str, Any]] = []
+        try:
+            async for key in redis.scan_iter(match="task:*:status", count=100):
+                parts = str(key).split(":")
+                if len(parts) < 3:
+                    continue
+                task_id = parts[1]
+                status = await redis.hgetall(key)
+                if status_filter and status.get("status") != status_filter:
+                    continue
+                rows.append({"task_id": task_id, "status": status})
+        except RedisError:
+            return []
+        return rows
+
+    async def clear_task_lock(self, task_id: str) -> None:
+        redis = await self.connect()
+        await redis.delete(f"task:{task_id}:lock")
+
     async def purge_queue(self) -> int:
         """Delete all pending jobs from the Redis queue and return the previous queue size.
 

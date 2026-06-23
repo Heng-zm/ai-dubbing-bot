@@ -4,6 +4,7 @@
 insert into public.bot_settings (key, value, value_type)
 values
     ('watermark_enabled', 'true', 'bool'),
+    ('watermark_render_mode', 'metadata', 'choice'),
     ('watermark_text', 'Dubbed by @aidubbingkhbot', 'str'),
     ('watermark_position', 'bottom_right', 'choice'),
     ('multi_voice_enabled', 'true', 'bool'),

@@ -54,6 +54,14 @@ SETTING_DEFS: dict[str, SettingDef] = {
     "clear_stale_queue_on_start": SettingDef("clear_stale_queue_on_start", "Clear queue on startup", "bool", settings.clear_stale_queue_on_start, restart_required=True),
     "redis_queue_key": SettingDef("redis_queue_key", "Queue key", "str", settings.redis_queue_key, "requires restart if changed", restart_required=True),
     "watermark_enabled": SettingDef("watermark_enabled", "Watermark", "bool", True),
+    "watermark_render_mode": SettingDef(
+        "watermark_render_mode",
+        "Watermark render mode",
+        "choice",
+        "metadata",
+        "metadata is fast; visible re-encodes video",
+        choices=("metadata", "visible", "off"),
+    ),
     "watermark_text": SettingDef("watermark_text", "Watermark text", "str", "Dubbed by @aidubbingkhbot", "shown on output video"),
     "watermark_position": SettingDef(
         "watermark_position", "Watermark position", "choice", "bottom_right", choices=("bottom_right", "bottom_left", "top_right", "top_left")

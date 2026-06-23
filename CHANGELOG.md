@@ -69,3 +69,12 @@ No new SQL migration is required if migrations 001-004 have already been run.
 ### Deployment
 
 No database migration is required. Redeploy the updated code only.
+
+## 91% Render freeze hotfix
+
+- Default watermark branding now uses fast MP4 metadata instead of visible `drawtext` re-encoding.
+- Added admin setting `watermark_render_mode`: `metadata`, `visible`, or `off`.
+- Visible watermark still works, but if it fails/timeouts the bot falls back to fast metadata branding.
+- ffmpeg merge now writes to a `.partial.mp4` file and atomically moves it only after success.
+- ffmpeg merge logs now show the selected plan: copy-video or encode-video.
+- Startup now recovers interrupted `processing` tasks after Render restarts and shows Retry/Start buttons instead of leaving users stuck at 91%.

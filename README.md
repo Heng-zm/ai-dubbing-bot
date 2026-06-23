@@ -620,11 +620,19 @@ Admin can toggle this in:
 
 ### 3. Watermark / Branding
 
-Final videos include a branding watermark by default:
+Final videos include branding by default:
 
 ```text
 Dubbed by @aidubbingkhbot
 ```
+
+Default mode is **metadata branding** for fast Render processing. This keeps the branding in the MP4 metadata and allows ffmpeg to copy the original video stream when possible. To force a visible text watermark on the video image, open `/admin → ⚙️ Settings` and set:
+
+```text
+Watermark render mode = visible
+```
+
+Use `metadata` for best performance on Render.
 
 Admin settings:
 
@@ -643,7 +651,7 @@ top_right
 top_left
 ```
 
-Note: watermark uses ffmpeg `drawtext`, so video must be re-encoded. If watermarking fails because the host ffmpeg lacks drawtext/font support, the bot retries automatically without watermark so the user still receives the video.
+Note: visible watermark uses ffmpeg `drawtext`, so video must be re-encoded and can be slow on small Render instances. The recommended production setting is `watermark_render_mode=metadata`. If visible watermarking fails or times out, the bot automatically retries with fast metadata branding so the user still receives the video.
 
 ### 4. Multi Voice Per Character
 
@@ -802,3 +810,28 @@ FFMPEG_MERGE_TIMEOUT_SECONDS=420
 
 If ffmpeg cannot finish inside the timeout, the task fails cleanly and the user can retry instead of waiting forever.
 
+
+
+## 91% stuck / Render restart fix
+
+If the bot previously stopped around:
+
+```text
+📦 កំពុងរៀបចំឯកសារលទ្ធផល... 91%
+```
+
+that stage was ffmpeg merging/encoding the output MP4. Visible watermarking forces a full video re-encode, which can be too heavy for a single Render Web Service. This update changes the default watermark mode to `metadata` so ffmpeg can use fast video stream copy when possible.
+
+Run this migration once:
+
+```text
+database/migrations/006_91_percent_ffmpeg_recovery.sql
+```
+
+Recommended admin setting:
+
+```text
+/admin → ⚙️ Settings → Watermark render mode → metadata
+```
+
+If Render restarts during processing, the bot now marks interrupted tasks as failed and shows a Retry button instead of leaving the user stuck at 91%.

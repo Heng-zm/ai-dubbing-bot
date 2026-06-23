@@ -269,7 +269,7 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
             steps=[
                 (84, f"🎬 កំពុង Encode វីដេអូ... សូមរង់ចាំបន្តិច\n\n{percent_line(84)}"),
                 (88, f"🎬 កំពុងបញ្ចប់ការបញ្ចូលសម្លេង...\n\n{percent_line(88)}"),
-                (91, f"📦 កំពុងរៀបចំឯកសារលទ្ធផល...\n\n{percent_line(91)}"),
+                (91, f"📦 កំពុងបង្កើតឯកសារ MP4... សូមរង់ចាំបន្តិច\n\n{percent_line(91)}"),
             ],
         )
         if not output_path.exists() or output_path.stat().st_size <= 0:

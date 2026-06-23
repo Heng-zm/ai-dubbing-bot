@@ -81,6 +81,7 @@ values
     ('clear_stale_queue_on_start', 'true', 'bool'),
     ('redis_queue_key', 'queue:dubbing', 'str'),
     ('watermark_enabled', 'true', 'bool'),
+    ('watermark_render_mode', 'metadata', 'choice'),
     ('watermark_text', 'Dubbed by @aidubbingkhbot', 'str'),
     ('watermark_position', 'bottom_right', 'choice'),
     ('multi_voice_enabled', 'true', 'bool'),

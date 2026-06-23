@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from app.config import settings
@@ -17,6 +19,73 @@ from app.services.redis_service import redis_service
 from app.services.runtime_settings import runtime_settings
 from app.services.supabase_service import supabase_service
 from app.utils.file_utils import check_ffmpeg_available, clean_temp_older_than
+from app.states import STATE_IDLE, TASK_FAILED, TASK_PROCESSING
+
+
+async def _recover_interrupted_processing_tasks(application: Application) -> None:
+    """Mark tasks interrupted by a Render restart as failed with a retry button.
+
+    When the process restarts while ffmpeg is merging or Telegram is uploading,
+    there is no pending Redis queue item left to consume. Without recovery the
+    user's progress message can stay at 91% forever. On startup we scan Redis
+    task status hashes, fail orphaned processing tasks, release stale locks, and
+    notify the user with a clean Khmer retry message when files still exist.
+    """
+    from pathlib import Path
+
+    from app.services.task_service import update_task_status
+
+    rows = await redis_service.scan_task_statuses(TASK_PROCESSING)
+    recovered = 0
+    for row in rows:
+        task_id = str(row.get("task_id") or "")
+        if not task_id:
+            continue
+        meta = await redis_service.get_task_meta(task_id)
+        await redis_service.clear_task_lock(task_id)
+        progress = int(float((row.get("status") or {}).get("progress") or 0))
+        await update_task_status(
+            task_id,
+            TASK_FAILED,
+            progress=progress,
+            error_message="[server_restart] Render restarted while task was processing",
+            mark_finished=True,
+        )
+        telegram_user_id = int(meta.get("telegram_user_id") or 0)
+        chat_id = int(meta.get("chat_id") or 0)
+        message_id = int(meta.get("progress_message_id") or 0)
+        video_exists = bool(meta.get("video_path") and Path(str(meta.get("video_path"))).exists())
+        srt_exists = bool(meta.get("srt_path") and Path(str(meta.get("srt_path"))).exists())
+        retry_allowed = video_exists and srt_exists
+        if telegram_user_id:
+            await redis_service.set_user_state(telegram_user_id, STATE_IDLE)
+            await redis_service.delete(f"user:{telegram_user_id}:task")
+
+        text = (
+            "⚠️ Task បានឈប់ពាក់កណ្តាលផ្លូវ ព្រោះ Server បាន Restart។\n\n"
+            "សូមទោសចំពោះការរង់ចាំ។ "
+            + (
+                "អ្នកអាចចុច Retry ដើម្បីដំណើរការម្តងទៀតបាន។"
+                if retry_allowed
+                else "ឯកសារ temp មិនមានទៀតទេ។ សូមចុច Start ហើយ Upload វីដេអូ + SRT ម្តងទៀត។"
+            )
+        )
+        buttons = []
+        if retry_allowed:
+            buttons.append([InlineKeyboardButton("🔄 ព្យាយាមម្តងទៀត", callback_data=f"dubbing:retry:{task_id}")])
+        buttons.append([InlineKeyboardButton("Start", callback_data="start_dubbing")])
+        markup = InlineKeyboardMarkup(buttons)
+        if chat_id:
+            try:
+                if message_id:
+                    await application.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=markup)
+                else:
+                    await application.bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+            except TelegramError as exc:
+                logger.warning("Could not notify user about interrupted task %s: %s", task_id, exc)
+        recovered += 1
+    if recovered:
+        logger.warning("Recovered %s interrupted processing task(s) after startup", recovered)
 
 
 async def _post_init(application: Application) -> None:
@@ -45,6 +114,8 @@ async def _post_init(application: Application) -> None:
         purged = await redis_service.purge_queue()
         if purged:
             logger.warning("Startup cleared %s stale Redis queue job(s). Local temp files are not durable across Render restarts.", purged)
+
+    await _recover_interrupted_processing_tasks(application)
 
     application.bot_data["health_server"] = start_health_server()
 
