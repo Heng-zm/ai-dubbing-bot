@@ -11,6 +11,7 @@ This module owns the user-facing dubbing workflow:
 from __future__ import annotations
 
 import uuid
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -51,11 +52,24 @@ from app.utils.telegram_ui import percent_line, status_emoji, status_label, step
 
 
 def _format_srt_instruction_message() -> str:
-    """Return the improved Khmer instruction shown after the video is accepted."""
+    """Return the improved Khmer instruction shown after the video is accepted.
+
+    This message is sent with Telegram HTML parse mode. The Gemini prompt is
+    wrapped in <pre> so Telegram displays it in a monospace/code block and the
+    user can copy it more easily.
+    """
     gemini_prompt = (
-        "Transcribe this video into a valid SRT subtitle file and translate all dialogue into natural Khmer. "
-        "Keep accurate timestamps, short readable subtitle lines, correct SRT numbering, and output only the final .srt content."
+        "Transcribe this video into a valid .srt subtitle file.\n"
+        "Translate all dialogue into natural Khmer.\n\n"
+        "Rules:\n"
+        "- Keep accurate timestamps from the video.\n"
+        "- Use short, natural Khmer subtitle lines.\n"
+        "- Keep correct SRT numbering: 1, 2, 3...\n"
+        "- Use SRT timestamp format: 00:00:01,000 --> 00:00:03,000\n"
+        "- Do not add explanations, markdown, or extra text.\n"
+        "- Output only the final SRT content."
     )
+    prompt_block = f"<pre>{escape(gemini_prompt)}</pre>"
     return (
         "✅ វីដេអូបានទទួលហើយ\n\n"
         f"{step_title(3, 4, 'ផ្ញើឯកសារ SRT')}\n\n"
@@ -65,7 +79,7 @@ def _format_srt_instruction_message() -> str:
         "1️⃣ ចូលទៅ Gemini: https://gemini.google.com/app\n"
         "2️⃣ Upload វីដេអូរបស់អ្នកទៅ Gemini\n"
         "3️⃣ Copy prompt ខាងក្រោម ហើយ Paste ចូល Gemini៖\n\n"
-        f"{gemini_prompt}\n\n"
+        f"{prompt_block}\n\n"
         "4️⃣ Copy លទ្ធផល SRT ពី Gemini → Save ជា file .srt\n"
         "5️⃣ ផ្ញើ file .srt នោះមក Bot ជា Document។"
     )
@@ -333,6 +347,7 @@ async def _handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             _format_srt_instruction_message(),
             reply_markup=_srt_instruction_keyboard(task_id),
             disable_web_page_preview=True,
+            parse_mode="HTML",
         )
     except ValueError as exc:
         delete_file(video_path)

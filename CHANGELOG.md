@@ -1,3 +1,9 @@
+
+## Prompt Monospace Update
+
+- Gemini SRT prompt now renders as a Telegram monospace/code block using HTML `<pre>`.
+- Added safe HTML escaping for the copy-ready Gemini prompt.
+
 # Changelog
 
 ## 2026-06-23 Production Bug Fixes + Performance Update

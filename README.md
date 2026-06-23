@@ -705,7 +705,18 @@ User-facing message includes:
 2️⃣ Upload វីដេអូរបស់អ្នកទៅ Gemini
 3️⃣ Copy prompt ខាងក្រោម ហើយ Paste ចូល Gemini៖
 
-Transcribe this video into a valid SRT subtitle file and translate all dialogue into natural Khmer. Keep accurate timestamps, short readable subtitle lines, correct SRT numbering, and output only the final .srt content.
+```text
+Transcribe this video into a valid .srt subtitle file.
+Translate all dialogue into natural Khmer.
+
+Rules:
+- Keep accurate timestamps from the video.
+- Use short, natural Khmer subtitle lines.
+- Keep correct SRT numbering: 1, 2, 3...
+- Use SRT timestamp format: 00:00:01,000 --> 00:00:03,000
+- Do not add explanations, markdown, or extra text.
+- Output only the final SRT content.
+```
 
 4️⃣ Copy លទ្ធផល SRT ពី Gemini → Save ជា file .srt
 5️⃣ ផ្ញើ file .srt នោះមក Bot ជា Document។
