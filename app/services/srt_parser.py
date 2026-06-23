@@ -1,4 +1,4 @@
-"""Simple SRT parser and validator."""
+"""Simple SRT parser and validator with optional character-label support."""
 
 from __future__ import annotations
 
@@ -17,6 +17,15 @@ SRT_BLOCK_RE = re.compile(
     r"(.+?)(?=\n\s*\n|\Z)"
 )
 
+CHARACTER_BRACKET_RE = re.compile(
+    r"^\s*[\[（(【{]\s*([^\]\）)】}:：]{1,40})\s*[\]\）)】}]\s*[:：\-–—]?\s*(.*)$",
+    re.S,
+)
+CHARACTER_PREFIX_RE = re.compile(
+    r"^\s*([A-Za-z][A-Za-z0-9 _\-]{0,32}|ប្រុស|ស្រី|បុរស|នារី|ក្មេងប្រុស|ក្មេងស្រី)\s*[:：]\s*(.+)$",
+    re.S,
+)
+
 
 @dataclass
 class SubtitleItem:
@@ -24,10 +33,36 @@ class SubtitleItem:
     start: float
     end: float
     text: str
+    character_label: str | None = None
 
     @property
     def duration(self) -> float:
         return max(0.0, self.end - self.start)
+
+
+def split_character_label(raw_text: str) -> tuple[str | None, str]:
+    """Extract an optional speaker label from a subtitle body.
+
+    Supported examples:
+    [boy] សួស្តី
+    [girl]: ចាស៎
+    boy: hello
+    ស្រី: សួស្តី
+    """
+    text = raw_text.strip()
+    match = CHARACTER_BRACKET_RE.match(text)
+    if match:
+        label = " ".join(match.group(1).split()).strip()
+        spoken = match.group(2).strip()
+        if label and spoken:
+            return label, spoken
+    match = CHARACTER_PREFIX_RE.match(text)
+    if match:
+        label = " ".join(match.group(1).split()).strip()
+        spoken = match.group(2).strip()
+        if label and spoken:
+            return label, spoken
+    return None, text
 
 
 def read_text_file(path: Path) -> str:
@@ -47,8 +82,9 @@ def parse_srt_text(text: str) -> List[SubtitleItem]:
         start = srt_timestamp_to_seconds(match.group(2).replace(".", ","))
         end = srt_timestamp_to_seconds(match.group(3).replace(".", ","))
         body = "\n".join(line.strip() for line in match.group(4).strip().splitlines()).strip()
-        body = normalize_tts_text(body)
-        items.append(SubtitleItem(index=index, start=start, end=end, text=body))
+        character_label, spoken_body = split_character_label(body)
+        spoken_body = normalize_tts_text(spoken_body)
+        items.append(SubtitleItem(index=index, start=start, end=end, text=spoken_body, character_label=character_label))
 
     if not items:
         raise ValueError("invalid_srt")

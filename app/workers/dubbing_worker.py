@@ -9,11 +9,12 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Bot
 from telegram.error import TelegramError
 
 from app.config import settings
 from app.services.audio_service import build_dubbed_audio
+from app.services.error_recovery import classify_error, recovery_keyboard
 from app.services.logger_service import log_db, logger
 from app.services.redis_service import redis_service
 from app.services.runtime_settings import runtime_settings
@@ -25,14 +26,6 @@ from app.utils.file_utils import check_ffmpeg_available, clean_task_files
 from app.utils.telegram_ui import percent_line
 
 
-
-def _retry_keyboard(task_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🔄 ព្យាយាមម្តងទៀត", callback_data=f"dubbing:retry:{task_id}")],
-            [InlineKeyboardButton("🎬 ចាប់ផ្តើមថ្មី", callback_data="start_dubbing")],
-        ]
-    )
 
 class StaleTaskFileError(RuntimeError):
     """Raised when a queued job points to a local temp file that no longer exists."""
@@ -173,22 +166,25 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
         await log_db("info", "worker", "Task completed", {"task_id": task_id, "user": telegram_user_id})
     except Exception as exc:
         err = str(exc)
-        is_stale_file = isinstance(exc, StaleTaskFileError)
-        user_message = (
-            "ឯកសារ Video/SRT របស់ Task ចាស់នេះមិនមានទៀតទេ។\n\nសូមចុច /start ហើយផ្ញើ Video + SRT ម្តងទៀត។"
-            if is_stale_file
-            else "សូមទោស មានបញ្ហាក្នុងការដំណើរការ។\n\nអ្នកអាចចុច 🔄 ព្យាយាមម្តងទៀត ឬចុច /start ដើម្បីចាប់ផ្តើមថ្មី។"
-        )
-        await update_task_status(task_id, TASK_FAILED, error_message=err, mark_finished=True)
+        recovery = classify_error(exc)
+        is_stale_file = recovery.category == "stale_file" or isinstance(exc, StaleTaskFileError)
+        user_message = f"❌ {recovery.title}\n\n{recovery.user_message}"
+        await update_task_status(task_id, TASK_FAILED, error_message=f"[{recovery.category}] {err}", mark_finished=True)
         await log_db(
             "warning" if is_stale_file else "error",
             "worker",
-            "Stale task skipped" if is_stale_file else "Task failed",
-            {"task_id": task_id, "error": err, "traceback": traceback.format_exc()},
+            "Task failed with smart recovery",
+            {
+                "task_id": task_id,
+                "category": recovery.category,
+                "admin_hint": recovery.admin_hint,
+                "error": err,
+                "traceback": traceback.format_exc(),
+            },
         )
         runtime = await runtime_settings.load()
         keep_failed_files = bool(runtime.get("keep_failed_files", settings.keep_failed_files))
-        retry_markup = _retry_keyboard(task_id) if (keep_failed_files and not is_stale_file) else None
+        retry_markup = recovery_keyboard(task_id, keep_failed_files and recovery.retry_allowed and not is_stale_file)
         try:
             if progress_message_id:
                 await bot.edit_message_text(

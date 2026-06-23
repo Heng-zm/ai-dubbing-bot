@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Iterable, List
 
 from app.config import settings
+from app.services.runtime_settings import runtime_settings
 from app.services.srt_parser import SubtitleItem
 from app.services.tts_service import generate_tts_audio
+from app.services.voice_service import voice_for_character
 from app.services.video_service import get_media_duration
 from app.utils.file_utils import run_subprocess
 from app.utils.telegram_ui import percent_line
@@ -169,15 +171,19 @@ async def build_dubbed_audio(
     cursor = 0.0
     total = max(len(subtitles), 1)
 
+    runtime = await runtime_settings.load()
+    multi_voice_enabled = bool(runtime.get("multi_voice_enabled", True))
+
     for idx, item in enumerate(subtitles, start=1):
         if item.start > cursor + 0.02:
             gap_path = task_audio_dir / f"gap_{idx:04d}.wav"
             await create_silence(gap_path, item.start - cursor)
             timeline_files.append(gap_path)
 
-        raw_path = task_audio_dir / f"tts_raw_{idx:04d}.mp3"
+        segment_voice = voice_for_character(getattr(item, "character_label", None), voice) if multi_voice_enabled else voice
+        raw_path = task_audio_dir / f"tts_raw_{idx:04d}_{abs(hash(segment_voice)) % 10000}.mp3"
         fitted_path = task_audio_dir / f"tts_fit_{idx:04d}.wav"
-        await generate_tts_audio(item.text, voice, raw_path)
+        await generate_tts_audio(item.text, segment_voice, raw_path)
         await fit_audio_to_duration(raw_path, fitted_path, item.duration)
         timeline_files.append(fitted_path)
         cursor = max(cursor, item.end)

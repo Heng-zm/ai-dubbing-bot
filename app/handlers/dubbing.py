@@ -18,12 +18,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app.config import settings
+from app.services.estimate_service import ProcessingEstimate, estimate_processing_time, format_processing_estimate
 from app.services.logger_service import log_db, logger
 from app.services.redis_service import redis_service
 from app.services.runtime_settings import runtime_settings
 from app.services.srt_parser import SubtitleItem, validate_srt_file
 from app.services.supabase_service import supabase_service
 from app.services.task_service import update_task_status
+from app.services.voice_service import summarize_character_voices
 from app.services.telegram_files import download_and_validate_video, download_srt
 from app.states import (
     STATE_IDLE,
@@ -106,13 +108,27 @@ def _format_srt_preview(items: list[SubtitleItem], video_duration: float, voice:
     total_chars = sum(len(item.text) for item in items)
     estimated_position = queue_count + 1
     voice_label = VOICE_LABELS.get(voice, voice)
+    runtime = runtime_settings.cached()
+    estimate = estimate_processing_time(
+        video_duration=video_duration,
+        subtitle_count=subtitle_count,
+        total_chars=total_chars,
+        queue_count=queue_count,
+        provider=str(runtime.get("tts_provider", settings.tts_provider)),
+    )
+    estimate_text = format_processing_estimate(estimate) if bool(runtime.get("show_processing_estimate", True)) else ""
 
     sample_lines: list[str] = []
     for item in items[:3]:
-        sample_lines.append(f"{item.index}. {truncate(item.text, 72)}")
+        speaker = f"[{item.character_label}] " if getattr(item, "character_label", None) else ""
+        sample_lines.append(f"{item.index}. {speaker}{truncate(item.text, 72)}")
     sample = "\n".join(sample_lines) if sample_lines else "គ្មាន preview"
 
+    character_lines = summarize_character_voices(items, voice) if bool(runtime.get("multi_voice_enabled", True)) else []
+    character_text = "\n".join(character_lines) if character_lines else "• មិនមាន label តួអង្គ — ប្រើសម្លេងដែលបានជ្រើសសម្រាប់គ្រប់បន្ទាត់"
+
     timing_ok = "ត្រឹមត្រូវ ✅" if last_end <= video_duration + 0.2 else "លើសវីដេអូ ⚠️"
+    estimate_block = f"\n⏱ ពេលវេលាប៉ាន់ស្មាន\n{estimate_text}\n" if estimate_text else ""
     return (
         f"{step_title(4, 4, 'ពិនិត្យ Subtitle Preview')}\n\n"
         "សូមពិនិត្យព័ត៌មានខាងក្រោម មុនចាប់ផ្តើមដំណើរការ។\n\n"
@@ -120,26 +136,32 @@ def _format_srt_preview(items: list[SubtitleItem], video_duration: float, voice:
         f"• Subtitle: {subtitle_count} ប្លុក\n"
         f"• Timing ចុងក្រោយ: {seconds_to_readable(last_end)} ({timing_ok})\n"
         f"• រយៈពេលវីដេអូ: {seconds_to_readable(video_duration)}\n"
-        f"• សម្លេង: {voice_label}\n"
+        f"• សម្លេង Default: {voice_label}\n"
         f"• តួអក្សរសរុប: {total_chars}\n"
-        f"• Queue រំពឹងទុក: ជួរទី {estimated_position}\n\n"
+        f"• Queue រំពឹងទុក: ជួរទី {estimated_position}\n"
+        f"{estimate_block}\n"
+        "👥 Multi Voice Per Character\n"
+        f"{character_text}\n\n"
         "🔎 Preview 3 បន្ទាត់ដំបូង\n"
         f"{sample}\n\n"
         "បើគ្រប់យ៉ាងត្រឹមត្រូវ សូមចុច ✅ ចាប់ផ្តើម Dubbing។"
     )
 
-def _queue_text(position: int | None) -> str:
+def _queue_text(position: int | None, estimate_text: str | None = None) -> str:
+    estimate_block = f"\n\n⏱ {estimate_text}" if estimate_text else ""
     if position and position > 1:
         return (
             "✅ បានដាក់ចូល Queue រួចហើយ\n\n"
             f"⏳ ជួររបស់អ្នក: លេខ {position}\n"
-            "ខ្ញុំនឹងដំណើរការដោយស្វ័យប្រវត្តិ ពេលដល់វេនរបស់អ្នក។\n\n"
+            "ខ្ញុំនឹងដំណើរការដោយស្វ័យប្រវត្តិ ពេលដល់វេនរបស់អ្នក។"
+            f"{estimate_block}\n\n"
             "ប្រើ /status ដើម្បីមើលស្ថានភាព។"
         )
     return (
         "⚙️ កំពុងចាប់ផ្តើម AI Dubbing...\n\n"
         f"{percent_line(12)}\n"
         "សូមរង់ចាំបន្តិច 🙏"
+        f"{estimate_block}"
     )
 
 def _user_can_access_task(task: dict[str, Any] | None, telegram_user_id: int) -> bool:
@@ -160,6 +182,7 @@ async def _enqueue_task(
     srt_path: str,
     video_duration: float,
     progress_message_id: int | None,
+    estimated_seconds: int | None = None,
 ) -> int:
     """Queue a task and return its 1-based queue position at enqueue time."""
     payload = {
@@ -171,6 +194,7 @@ async def _enqueue_task(
         "srt_path": srt_path,
         "video_duration": video_duration,
         "progress_message_id": progress_message_id,
+        "estimated_seconds": estimated_seconds or 0,
     }
     position = await redis_service.enqueue(payload)
     await redis_service.set_task_meta(
@@ -184,6 +208,7 @@ async def _enqueue_task(
             "video_duration": video_duration,
             "progress_message_id": progress_message_id or "",
             "last_queue_position": position,
+            "estimated_seconds": estimated_seconds or 0,
         },
     )
     return position
@@ -324,6 +349,7 @@ async def _handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 "subtitle_count": len(items),
                 "subtitle_last_end": max(item.end for item in items),
                 "subtitle_chars": sum(len(item.text) for item in items),
+                "detected_characters": ", ".join(sorted({str(item.character_label) for item in items if item.character_label})),
             },
         )
         await redis_service.set_task_status(task_id, TASK_WAITING_SRT, 12)
@@ -409,6 +435,17 @@ async def _confirm_task(query, telegram_user_id: int) -> None:
     await redis_service.set_user_task(telegram_user_id, task_id)
     await redis_service.set_user_state(telegram_user_id, STATE_PROCESSING)
 
+    subtitle_count = int(meta.get("subtitle_count") or 0)
+    subtitle_chars = int(meta.get("subtitle_chars") or 0)
+    runtime = await runtime_settings.load()
+    estimate = estimate_processing_time(
+        video_duration=video_duration,
+        subtitle_count=subtitle_count,
+        total_chars=subtitle_chars,
+        queue_count=await redis_service.queue_count(),
+        provider=str(runtime.get("tts_provider", settings.tts_provider)),
+    )
+    estimate_text = format_processing_estimate(estimate) if bool(runtime.get("show_processing_estimate", True)) else None
     position = await _enqueue_task(
         task_id=task_id,
         telegram_user_id=telegram_user_id,
@@ -418,8 +455,9 @@ async def _confirm_task(query, telegram_user_id: int) -> None:
         srt_path=str(srt_path),
         video_duration=video_duration,
         progress_message_id=query.message.message_id,
+        estimated_seconds=estimate.total_seconds,
     )
-    await query.edit_message_text(_queue_text(position))
+    await query.edit_message_text(_queue_text(position, estimate_text))
 
 
 async def _change_srt(query, telegram_user_id: int, task_id: str) -> None:
@@ -502,6 +540,18 @@ async def _retry_failed_task(query, telegram_user_id: int, task_id: str) -> None
     await redis_service.set_user_task(telegram_user_id, task_id)
     await redis_service.set_user_state(telegram_user_id, STATE_PROCESSING)
 
+    meta = await redis_service.get_task_meta(task_id)
+    subtitle_count = int(meta.get("subtitle_count") or 0)
+    subtitle_chars = int(meta.get("subtitle_chars") or 0)
+    runtime = await runtime_settings.load()
+    estimate = estimate_processing_time(
+        video_duration=video_duration,
+        subtitle_count=subtitle_count,
+        total_chars=subtitle_chars,
+        queue_count=await redis_service.queue_count(),
+        provider=str(runtime.get("tts_provider", settings.tts_provider)),
+    )
+    estimate_text = format_processing_estimate(estimate) if bool(runtime.get("show_processing_estimate", True)) else None
     position = await _enqueue_task(
         task_id=task_id,
         telegram_user_id=telegram_user_id,
@@ -511,8 +561,9 @@ async def _retry_failed_task(query, telegram_user_id: int, task_id: str) -> None
         srt_path=srt_path,
         video_duration=video_duration,
         progress_message_id=query.message.message_id,
+        estimated_seconds=estimate.total_seconds,
     )
-    await query.edit_message_text(_queue_text(position))
+    await query.edit_message_text(_queue_text(position, estimate_text))
 
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -536,12 +587,18 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     progress = status.get("progress", "0")
     queue_position = await redis_service.queue_position(task_id)
     position_line = f"\n⏳ Queue: ជួរទី {queue_position}" if queue_position else ""
+    meta = await redis_service.get_task_meta(task_id)
+    estimate_seconds = int(meta.get("estimated_seconds") or 0)
+    estimate_line = ""
+    if estimate_seconds:
+        estimate_line = "\n⏱ " + format_processing_estimate(ProcessingEstimate(processing_seconds=estimate_seconds, queue_wait_seconds=0))
     await message.reply_text(
         f"{status_emoji(raw_status)} ស្ថានភាព Task\n\n"
         f"🆔 ID: {task_id[:8]}\n"
         f"📌 Status: {status_label(raw_status)}\n"
         f"📊 Progress: {percent_line(progress)}"
-        f"{position_line}\n\n"
+        f"{position_line}"
+        f"{estimate_line}\n\n"
         "ប្រើ /cancel ប្រសិនបើចង់បោះបង់ Task នេះ។"
     )
 

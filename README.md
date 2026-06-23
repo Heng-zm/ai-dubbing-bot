@@ -560,3 +560,128 @@ This version includes a cleaner Telegram experience:
 - Broadcast and cleanup confirmations use clearer wording.
 
 No new environment variables are required for this UX update.
+
+## Update: Smart Recovery, Estimate, Watermark, Multi Voice
+
+This version adds four production features:
+
+### 1. Smart Error Recovery
+
+When a task fails, the worker classifies the error and shows a useful Khmer recovery message instead of a generic failure.
+
+Detected categories include:
+
+- `edge_tts_403` — Edge TTS blocked/rate limited the Render server
+- `azure_config` — Azure fallback is selected but key/region is missing
+- `ffmpeg` — video/audio merge or codec problem
+- `srt` — bad subtitle timing or SRT format
+- `telegram_send` — final video created but Telegram upload failed
+- `stale_file` — Render temp file disappeared after restart/redeploy
+- `unknown` — fallback category with retry button
+
+The user sees the right button:
+
+```text
+[ 🔄 ព្យាយាមម្តងទៀត ]
+[ 🎬 ចាប់ផ្តើមថ្មី ]
+```
+
+For stale missing files, retry is hidden because local Render temp files cannot be recovered.
+
+### 2. Processing Time Estimate
+
+Before processing, the SRT preview now shows estimated processing time based on:
+
+- Video duration
+- Subtitle count
+- Total subtitle characters
+- Queue length
+- TTS provider: edge / auto / azure
+
+`/status` also shows the estimate while the task is queued or processing.
+
+Admin can toggle this in:
+
+```text
+/admin → ⚙️ Settings → ⏱ Time estimate
+```
+
+### 3. Watermark / Branding
+
+Final videos include a branding watermark by default:
+
+```text
+Dubbed by @aidubbingkhbot
+```
+
+Admin settings:
+
+```text
+/admin → ⚙️ Settings → 🏷 Watermark
+/admin → ⚙️ Settings → ✍️ Watermark text
+/admin → ⚙️ Settings → 📍 Watermark position
+```
+
+Supported positions:
+
+```text
+bottom_right
+bottom_left
+top_right
+top_left
+```
+
+Note: watermark uses ffmpeg `drawtext`, so video must be re-encoded. If watermarking fails because the host ffmpeg lacks drawtext/font support, the bot retries automatically without watermark so the user still receives the video.
+
+### 4. Multi Voice Per Character
+
+Users can write character labels in SRT. The bot strips the label from spoken text and uses the matching voice.
+
+Examples:
+
+```srt
+1
+00:00:00,000 --> 00:00:02,000
+[boy] សួស្តី!
+
+2
+00:00:02,100 --> 00:00:04,000
+[girl] ចាស៎!
+```
+
+Also supported:
+
+```text
+boy: Hello
+girl: Hello
+ប្រុស: សួស្តី
+ស្រី: សួស្តី
+```
+
+Default mapping:
+
+```text
+boy / male / ប្រុស → km-KH-PisethNeural
+girl / female / ស្រី → km-KH-SreymomNeural
+unknown label → user's selected default voice
+```
+
+Admin can toggle this in:
+
+```text
+/admin → ⚙️ Settings → 👥 Multi voice
+```
+
+## Required Supabase Migration
+
+Run this migration after deploying this update:
+
+```text
+database/migrations/003_smart_recovery_estimate_watermark_multivoice.sql
+```
+
+Or rerun the full schema:
+
+```text
+database/supabase_schema.sql
+```

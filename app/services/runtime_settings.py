@@ -49,6 +49,13 @@ SETTING_DEFS: dict[str, SettingDef] = {
     "keep_failed_files": SettingDef("keep_failed_files", "Keep failed files", "bool", settings.keep_failed_files),
     "clear_stale_queue_on_start": SettingDef("clear_stale_queue_on_start", "Clear queue on startup", "bool", settings.clear_stale_queue_on_start, restart_required=True),
     "redis_queue_key": SettingDef("redis_queue_key", "Queue key", "str", settings.redis_queue_key, "requires restart if changed", restart_required=True),
+    "watermark_enabled": SettingDef("watermark_enabled", "Watermark", "bool", True),
+    "watermark_text": SettingDef("watermark_text", "Watermark text", "str", "Dubbed by @aidubbingkhbot", "shown on output video"),
+    "watermark_position": SettingDef(
+        "watermark_position", "Watermark position", "choice", "bottom_right", choices=("bottom_right", "bottom_left", "top_right", "top_left")
+    ),
+    "multi_voice_enabled": SettingDef("multi_voice_enabled", "Multi voice per character", "bool", True),
+    "show_processing_estimate": SettingDef("show_processing_estimate", "Processing time estimate", "bool", True),
 }
 
 CACHE_KEY = "bot:runtime_settings"

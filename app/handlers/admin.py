@@ -42,6 +42,11 @@ SETTING_UI_LABELS = {
     "keep_failed_files": "🧪 Keep failed files",
     "clear_stale_queue_on_start": "🧾 Clear queue on startup",
     "redis_queue_key": "🔑 Queue key",
+    "watermark_enabled": "🏷 Watermark",
+    "watermark_text": "✍️ Watermark text",
+    "watermark_position": "📍 Watermark position",
+    "multi_voice_enabled": "👥 Multi voice",
+    "show_processing_estimate": "⏱ Time estimate",
 }
 
 
@@ -75,6 +80,11 @@ SETTING_ORDER = [
     "keep_failed_files",
     "clear_stale_queue_on_start",
     "redis_queue_key",
+    "watermark_enabled",
+    "watermark_text",
+    "watermark_position",
+    "multi_voice_enabled",
+    "show_processing_estimate",
 ]
 
 

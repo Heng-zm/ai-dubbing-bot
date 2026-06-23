@@ -23,7 +23,12 @@ values
     ('clean_success_files', 'true', 'bool'),
     ('keep_failed_files', 'true', 'bool'),
     ('clear_stale_queue_on_start', 'true', 'bool'),
-    ('redis_queue_key', 'queue:dubbing', 'str')
+    ('redis_queue_key', 'queue:dubbing', 'str'),
+    ('watermark_enabled', 'true', 'bool'),
+    ('watermark_text', 'Dubbed by @aidubbingkhbot', 'str'),
+    ('watermark_position', 'bottom_right', 'choice'),
+    ('multi_voice_enabled', 'true', 'bool'),
+    ('show_processing_estimate', 'true', 'bool')
 on conflict (key) do nothing;
 
 create index if not exists idx_bot_settings_updated_at on public.bot_settings(updated_at desc);
