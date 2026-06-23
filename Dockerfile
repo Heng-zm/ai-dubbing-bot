@@ -16,4 +16,6 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . .
 
+EXPOSE 10000
+
 CMD ["python", "-m", "app.main"]

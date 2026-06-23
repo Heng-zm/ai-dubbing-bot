@@ -2,6 +2,12 @@
 
 The Supabase Python client is synchronous, so this service wraps calls in
 asyncio.to_thread when used from async Telegram handlers.
+
+Production note:
+PostgREST/Supabase can temporarily keep an old schema cache after a migration.
+If the deployed code sends a newly added column, Supabase may return PGRST204.
+The write helpers below retry without optional columns such as updated_at so the
+bot keeps running while the database migration/schema cache is being fixed.
 """
 
 from __future__ import annotations
@@ -17,9 +23,27 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_missing_column_error(exc: Exception, column: str) -> bool:
+    """Detect Supabase/PostgREST PGRST204 stale/missing-column errors.
+
+    supabase-py raises postgrest.exceptions.APIError and its payload is not
+    stable across versions, so string matching is intentionally defensive.
+    """
+    text = str(exc)
+    return "PGRST204" in text and f"'{column}'" in text and "column" in text
+
+
+def _without_keys(payload: Dict[str, Any], *keys: str) -> Dict[str, Any]:
+    clone = dict(payload)
+    for key in keys:
+        clone.pop(key, None)
+    return clone
+
+
 class SupabaseService:
     def __init__(self) -> None:
         self.client = None
+        self._warned_missing_updated_at_tables: set[str] = set()
 
     def connect_sync(self):
         if self.client is None:
@@ -29,6 +53,22 @@ class SupabaseService:
 
             self.client = create_client(settings.supabase_url, settings.supabase_service_key)
         return self.client
+
+    def _warn_missing_optional_column_once(self, table: str, column: str, exc: Exception) -> None:
+        """Log once when a safe fallback is used for an optional schema column."""
+        key = f"{table}.{column}"
+        if key in self._warned_missing_updated_at_tables:
+            return
+        self._warned_missing_updated_at_tables.add(key)
+        from app.services.logger_service import logger
+
+        logger.warning(
+            "Supabase table %s is missing optional column %s or schema cache is stale. "
+            "Retrying write without it. Run database/migrations/001_add_updated_at_and_reload_cache.sql. Error: %s",
+            table,
+            column,
+            exc,
+        )
 
     async def health_check(self) -> bool:
         """Return True when credentials and required tables are usable."""
@@ -48,21 +88,28 @@ class SupabaseService:
 
     async def upsert_user(self, user, selected_voice: str | None = None) -> Optional[Dict[str, Any]]:
         now_iso = _now_iso()
-        payload = {
+        base_payload = {
             "telegram_user_id": user.id,
             "username": user.username,
             "first_name": user.first_name,
             "last_name": user.last_name,
             "language_code": user.language_code,
             "last_active_at": now_iso,
-            "updated_at": now_iso,
         }
         if selected_voice:
-            payload["selected_voice"] = selected_voice
+            base_payload["selected_voice"] = selected_voice
+        payload = dict(base_payload)
+        payload["updated_at"] = now_iso
 
         def _run():
             client = self.connect_sync()
-            result = client.table("users").upsert(payload, on_conflict="telegram_user_id").execute()
+            try:
+                result = client.table("users").upsert(payload, on_conflict="telegram_user_id").execute()
+            except Exception as exc:
+                if not _is_missing_column_error(exc, "updated_at"):
+                    raise
+                self._warn_missing_optional_column_once("users", "updated_at", exc)
+                result = client.table("users").upsert(base_payload, on_conflict="telegram_user_id").execute()
             rows = result.data or []
             if rows:
                 return rows[0]
@@ -72,11 +119,19 @@ class SupabaseService:
         return await asyncio.to_thread(_run)
 
     async def update_user_voice(self, telegram_user_id: int, voice: str) -> None:
+        payload = {"selected_voice": voice, "updated_at": _now_iso()}
+
         def _run() -> None:
             client = self.connect_sync()
-            client.table("users").update({"selected_voice": voice, "updated_at": _now_iso()}).eq(
-                "telegram_user_id", telegram_user_id
-            ).execute()
+            try:
+                client.table("users").update(payload).eq("telegram_user_id", telegram_user_id).execute()
+            except Exception as exc:
+                if not _is_missing_column_error(exc, "updated_at"):
+                    raise
+                self._warn_missing_optional_column_once("users", "updated_at", exc)
+                client.table("users").update(_without_keys(payload, "updated_at")).eq(
+                    "telegram_user_id", telegram_user_id
+                ).execute()
 
         await asyncio.to_thread(_run)
 
@@ -89,11 +144,20 @@ class SupabaseService:
         return await asyncio.to_thread(_run)
 
     async def update_task(self, task_id: str, payload: Dict[str, Any]) -> None:
+        clean_payload = dict(payload)
+        clean_payload["updated_at"] = _now_iso()
+
         def _run() -> None:
             client = self.connect_sync()
-            clean_payload = dict(payload)
-            clean_payload["updated_at"] = _now_iso()
-            client.table("dubbing_tasks").update(clean_payload).eq("id", task_id).execute()
+            try:
+                client.table("dubbing_tasks").update(clean_payload).eq("id", task_id).execute()
+            except Exception as exc:
+                if not _is_missing_column_error(exc, "updated_at"):
+                    raise
+                self._warn_missing_optional_column_once("dubbing_tasks", "updated_at", exc)
+                client.table("dubbing_tasks").update(_without_keys(clean_payload, "updated_at")).eq(
+                    "id", task_id
+                ).execute()
 
         await asyncio.to_thread(_run)
 

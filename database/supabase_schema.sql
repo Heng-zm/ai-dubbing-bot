@@ -91,3 +91,6 @@ for each row execute function public.set_updated_at();
 
 -- Recommended for server-side bots using SUPABASE_SERVICE_KEY.
 -- Service role bypasses RLS. If you enable RLS, add policies carefully.
+
+-- Force Supabase/PostgREST Data API to see newly added columns immediately.
+notify pgrst, 'reload schema';
