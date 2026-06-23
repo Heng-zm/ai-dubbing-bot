@@ -19,7 +19,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if isinstance(update, Update) and update.effective_message:
         try:
             await update.effective_message.reply_text(
-                "សូមទោស មានបញ្ហាក្នុងការដំណើរការ។ សូមព្យាយាមម្តងទៀត។"
+                "សូមទោស មានបញ្ហាបន្តិចក្នុងការដំណើរការ។\n\n"
+                "សូមព្យាយាមម្តងទៀត ឬចុច /start ដើម្បីចាប់ផ្តើមថ្មី។"
             )
         except Exception:
             pass

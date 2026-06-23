@@ -244,6 +244,42 @@ class SupabaseService:
 
         return await asyncio.to_thread(_run)
 
+
+
+    async def get_bot_settings(self) -> Dict[str, Any]:
+        """Return runtime bot settings as key -> value from Supabase."""
+        def _run():
+            client = self.connect_sync()
+            result = client.table("bot_settings").select("key,value").execute()
+            rows = result.data or []
+            return {str(row.get("key")): row.get("value") for row in rows if row.get("key")}
+
+        return await asyncio.to_thread(_run)
+
+    async def upsert_bot_setting(self, key: str, value: str, value_type: str, admin_telegram_id: int) -> None:
+        """Create/update one runtime bot setting."""
+        payload = {
+            "key": key,
+            "value": value,
+            "value_type": value_type,
+            "updated_by": admin_telegram_id,
+            "updated_at": _now_iso(),
+        }
+
+        def _run() -> None:
+            client = self.connect_sync()
+            client.table("bot_settings").upsert(payload, on_conflict="key").execute()
+
+        await asyncio.to_thread(_run)
+
+    async def delete_bot_setting(self, key: str) -> None:
+        """Delete one runtime setting so the bot uses its default value again."""
+        def _run() -> None:
+            client = self.connect_sync()
+            client.table("bot_settings").delete().eq("key", key).execute()
+
+        await asyncio.to_thread(_run)
+
     async def stats(self) -> Dict[str, Any]:
         def _count(table: str, status: str | None = None) -> int:
             client = self.connect_sync()

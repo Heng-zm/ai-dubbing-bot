@@ -10,10 +10,11 @@ from app.config import settings
 from app.handlers.admin import admin_callback, admin_command, handle_admin_text
 from app.handlers.dubbing import cancel_command, dubbing_callback, handle_video_or_document, status_command
 from app.handlers.errors import error_handler
-from app.handlers.start import start_command, start_dubbing_callback, voice_callback
+from app.handlers.start import help_callback, help_command, home_callback, start_command, start_dubbing_callback, voice_callback
 from app.services.health_server import start_health_server, stop_health_server
 from app.services.logger_service import logger
 from app.services.redis_service import redis_service
+from app.services.runtime_settings import runtime_settings
 from app.services.supabase_service import supabase_service
 from app.utils.file_utils import check_ffmpeg_available, clean_temp_older_than
 
@@ -25,10 +26,6 @@ async def _post_init(application: Application) -> None:
         logger.info("Startup temp cleanup deleted %s old files", deleted)
 
     redis_ok = await redis_service.ping()
-    if redis_ok and settings.clear_stale_queue_on_start:
-        purged = await redis_service.purge_queue()
-        if purged:
-            logger.warning("Startup cleared %s stale Redis queue job(s). Local temp files are not durable across Render restarts.", purged)
     supabase_ok = await supabase_service.health_check()
     logger.info("Startup checks | Redis=%s | Supabase=%s", redis_ok, supabase_ok)
     if not redis_ok:
@@ -43,13 +40,20 @@ async def _post_init(application: Application) -> None:
         else:
             raise RuntimeError(message)
 
+    runtime = await runtime_settings.load(force=True)
+    if bool(runtime.get("clear_stale_queue_on_start", settings.clear_stale_queue_on_start)):
+        purged = await redis_service.purge_queue()
+        if purged:
+            logger.warning("Startup cleared %s stale Redis queue job(s). Local temp files are not durable across Render restarts.", purged)
+
     application.bot_data["health_server"] = start_health_server()
 
-    if settings.in_process_worker:
+    if bool(runtime.get("in_process_worker", settings.in_process_worker)):
         from app.workers.dubbing_worker import worker_loop
 
         worker_tasks = []
-        for index in range(settings.in_process_worker_count):
+        worker_count = max(1, min(4, int(runtime.get("in_process_worker_count", settings.in_process_worker_count))))
+        for index in range(worker_count):
             task = asyncio.create_task(worker_loop(application.bot, name=f"in-process-dubbing-worker-{index + 1}"))
             worker_tasks.append(task)
         application.bot_data["worker_tasks"] = worker_tasks
@@ -71,7 +75,7 @@ async def _post_shutdown(application: Application) -> None:
 async def text_router(update, context) -> None:
     if await handle_admin_text(update, context):
         return
-    await update.effective_message.reply_text("សូមចុច /start ដើម្បីចាប់ផ្តើមប្រើ Bot។")
+    await update.effective_message.reply_text("សូមចុច /start ដើម្បីចាប់ផ្តើម ឬ /help ដើម្បីមើលរបៀបប្រើ។")
 
 
 def build_application() -> Application:
@@ -89,8 +93,11 @@ def build_application() -> Application:
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CallbackQueryHandler(home_callback, pattern="^start_home$"))
+    application.add_handler(CallbackQueryHandler(help_callback, pattern="^start_help$"))
     application.add_handler(CallbackQueryHandler(start_dubbing_callback, pattern="^start_dubbing$"))
     application.add_handler(CallbackQueryHandler(voice_callback, pattern="^voice:"))
     application.add_handler(CallbackQueryHandler(dubbing_callback, pattern="^dubbing:"))

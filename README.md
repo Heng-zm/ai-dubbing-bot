@@ -167,7 +167,7 @@ python run_worker.py
 ## Telegram user flow
 
 1. User sends `/start`.
-2. User clicks `សម្រាយរឿង`.
+2. User clicks `🎙️ ចាប់ផ្តើម Dubbing`.
 3. User chooses voice gender.
 4. User sends video.
 5. User sends `.srt` file.
@@ -441,7 +441,7 @@ This build adds three production UX features:
 After the user confirms the SRT preview, the bot enqueues the job and shows the estimated position:
 
 ```text
-Task របស់អ្នកត្រូវបានដាក់ចូល Queue ហើយ ✅
+✅ បានដាក់ចូល Queue រួចហើយ
 ការងាររបស់អ្នកស្ថិតនៅជួរទី 2។
 ```
 
@@ -494,3 +494,69 @@ CLEAR_STALE_QUEUE_ON_START=true
 IN_PROCESS_WORKER=true
 IN_PROCESS_WORKER_COUNT=1
 ```
+
+## Update: Admin-configurable bot settings
+
+Operational bot settings are no longer required in Render `.env`. Keep only secrets and infrastructure in Render environment:
+
+```env
+BOT_TOKEN=
+ADMIN_IDS=
+SUPABASE_URL=
+SUPABASE_SERVICE_KEY=
+REDIS_URL=
+ENABLE_HEALTH_SERVER=true
+```
+
+Then configure runtime settings inside Telegram:
+
+```text
+/admin → ⚙️ Settings
+```
+
+Admin can edit:
+
+```text
+Max video duration: 60s
+Max video size: 50MB
+Max SRT size: 2MB
+TTS provider: edge
+TTS cache: True
+Keep original audio: False
+Original audio volume: 0.0
+Dubbed audio volume: 1.0
+In-process worker: True
+Worker count: 1
+Clean success files: True
+Keep failed files: True
+Clear queue on startup: True
+Queue key: queue:dubbing
+```
+
+Run this migration once in Supabase SQL Editor:
+
+```sql
+-- database/migrations/002_add_bot_settings.sql
+```
+
+Settings are stored in `public.bot_settings` and cached in Redis. Most settings apply immediately. Settings marked restart-required, such as worker count and clear queue on startup, apply fully after a Render redeploy/restart.
+
+## UX / Flow Update
+
+This version includes a cleaner Telegram experience:
+
+- `/start` now shows a polished Khmer welcome screen with clear requirements.
+- Added `/help` and an inline “របៀបប្រើ” help screen.
+- Step labels guide users through the flow:
+  1. Choose voice
+  2. Send video
+  3. Send SRT
+  4. Confirm subtitle preview
+- SRT preview now uses cleaner wording and shows timing status.
+- Queue and processing messages now use progress bars.
+- `/status` now shows Khmer status labels, emoji status, progress bar, and queue position.
+- Failed task retry buttons have clearer text.
+- Admin dashboard buttons and settings labels are cleaner and easier to scan.
+- Broadcast and cleanup confirmations use clearer wording.
+
+No new environment variables are required for this UX update.

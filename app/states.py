@@ -6,6 +6,7 @@ STATE_WAITING_SRT = "waiting_srt"
 STATE_WAITING_CONFIRM = "waiting_confirm"
 STATE_PROCESSING = "processing"
 STATE_ADMIN_BROADCAST_TEXT = "admin_broadcast_text"
+STATE_ADMIN_SETTING_VALUE = "admin_setting_value"
 
 TASK_WAITING_VIDEO = "waiting_video"
 TASK_WAITING_SRT = "waiting_srt"

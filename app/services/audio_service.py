@@ -11,6 +11,7 @@ from app.services.srt_parser import SubtitleItem
 from app.services.tts_service import generate_tts_audio
 from app.services.video_service import get_media_duration
 from app.utils.file_utils import run_subprocess
+from app.utils.telegram_ui import percent_line
 
 
 def _atempo_chain(speed: float) -> str:
@@ -183,7 +184,7 @@ async def build_dubbed_audio(
 
         if progress_callback:
             percent = 20 + math.floor((idx / total) * 55)
-            await progress_callback(percent, f"កំពុងបង្កើតសម្លេង AI... {percent}%")
+            await progress_callback(percent, f"🎙️ កំពុងបង្កើតសម្លេង AI...\n\n{percent_line(percent)}\nSubtitle {idx}/{total}")
 
     if video_duration > cursor + 0.02:
         tail_path = task_audio_dir / "tail_silence.wav"

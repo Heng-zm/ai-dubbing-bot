@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from app.config import settings
+from app.services.runtime_settings import runtime_settings
 from app.utils.file_utils import run_subprocess
 
 MP4_COPY_VIDEO_CODECS = {"h264", "hevc", "mpeg4"}
@@ -64,7 +65,11 @@ async def merge_audio_with_video(
     For mp4-compatible video codecs, video is copied to preserve quality and speed.
     For webm/VP9/other codecs, video is transcoded to H.264 so the final .mp4 is playable.
     """
-    keep_original = settings.keep_original_audio if keep_original_audio is None else keep_original_audio
+    runtime = await runtime_settings.load()
+    keep_original_default = bool(runtime.get("keep_original_audio", settings.keep_original_audio))
+    original_audio_volume = float(runtime.get("original_audio_volume", settings.original_audio_volume))
+    dubbed_audio_volume = float(runtime.get("dubbed_audio_volume", settings.dubbed_audio_volume))
+    keep_original = keep_original_default if keep_original_audio is None else keep_original_audio
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if keep_original and not await has_audio_stream(video_path):
         keep_original = False
@@ -94,8 +99,8 @@ async def merge_audio_with_video(
 
     if keep_original:
         filter_complex = (
-            f"[0:a]volume={settings.original_audio_volume}[orig];"
-            f"[1:a]volume={settings.dubbed_audio_volume}[dub];"
+            f"[0:a]volume={original_audio_volume}[orig];"
+            f"[1:a]volume={dubbed_audio_volume}[dub];"
             "[orig][dub]amix=inputs=2:duration=first:dropout_transition=0[aout]"
         )
         cmd = common + [
@@ -123,7 +128,7 @@ async def merge_audio_with_video(
             "1:a:0",
             *video_args,
             "-af",
-            f"volume={settings.dubbed_audio_volume}",
+            f"volume={dubbed_audio_volume}",
             "-c:a",
             "aac",
             "-b:a",

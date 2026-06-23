@@ -19,6 +19,7 @@ import httpx
 
 from app.config import settings
 from app.services.logger_service import logger
+from app.services.runtime_settings import runtime_settings
 from app.utils.text_utils import normalize_tts_text
 
 ProviderName = Literal["edge", "azure"]
@@ -59,7 +60,7 @@ async def _copy_file(src: Path, dst: Path) -> None:
 
 
 async def _try_cache_hit(provider: str, voice: str, text: str, output_path: Path) -> bool:
-    if not settings.tts_cache_enabled:
+    if not bool(runtime_settings.cached().get("tts_cache_enabled", settings.tts_cache_enabled)):
         return False
     cache = _cache_path(provider, voice, text)
     if cache.exists() and cache.stat().st_size > 0:
@@ -69,7 +70,7 @@ async def _try_cache_hit(provider: str, voice: str, text: str, output_path: Path
 
 
 async def _save_cache(provider: str, voice: str, text: str, output_path: Path) -> None:
-    if not settings.tts_cache_enabled or not output_path.exists() or output_path.stat().st_size <= 0:
+    if not bool(runtime_settings.cached().get("tts_cache_enabled", settings.tts_cache_enabled)) or not output_path.exists() or output_path.stat().st_size <= 0:
         return
     async with _CACHE_LOCK:
         cache = _cache_path(provider, voice, text)
@@ -177,9 +178,11 @@ async def generate_tts_audio(text: str, voice: str, output_path: Path) -> Path:
     if not clean_text:
         raise ValueError("Cannot generate TTS from empty subtitle text")
 
-    if settings.tts_provider == "azure":
+    runtime = await runtime_settings.load()
+    tts_provider = str(runtime.get("tts_provider", settings.tts_provider)).lower()
+    if tts_provider == "azure":
         providers: list[ProviderName] = ["azure"]
-    elif settings.tts_provider == "auto":
+    elif tts_provider == "auto":
         providers = ["edge", "azure"]
     else:
         providers = ["edge"]
@@ -201,7 +204,7 @@ async def generate_tts_audio(text: str, voice: str, output_path: Path) -> Path:
                     settings.tts_max_retries,
                     exc,
                 )
-                if provider_name == "edge" and settings.tts_provider == "auto" and _is_edge_forbidden_error(exc):
+                if provider_name == "edge" and tts_provider == "auto" and _is_edge_forbidden_error(exc):
                     logger.warning("edge-tts returned 403/blocking. Trying Azure Speech fallback if configured.")
                     break
                 await asyncio.sleep(min(settings.tts_retry_base_delay_seconds * attempt, 15))

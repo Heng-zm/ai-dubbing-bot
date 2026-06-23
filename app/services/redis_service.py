@@ -137,6 +137,14 @@ class RedisService:
         if current == owner:
             await redis.delete(key)
 
+    async def _queue_key(self) -> str:
+        try:
+            from app.services.runtime_settings import runtime_settings
+
+            return await runtime_settings.get_str("redis_queue_key")
+        except Exception:
+            return settings.redis_queue_key
+
     async def enqueue(self, payload: Dict[str, Any]) -> int:
         """Push a job into the queue and return its 1-based position after enqueue.
 
@@ -145,10 +153,11 @@ class RedisService:
         position by scanning pending queue items.
         """
         redis = await self.connect()
+        queue_key = await self._queue_key()
         enriched = dict(payload)
         enriched.setdefault("enqueued_at", datetime.now(timezone.utc).isoformat())
-        await redis.rpush(settings.redis_queue_key, json.dumps(enriched, ensure_ascii=False))
-        return int(await redis.llen(settings.redis_queue_key))
+        await redis.rpush(queue_key, json.dumps(enriched, ensure_ascii=False))
+        return int(await redis.llen(queue_key))
 
     async def queue_position(self, task_id: str) -> Optional[int]:
         """Return the current 1-based pending queue position for a task.
@@ -158,7 +167,7 @@ class RedisService:
         """
         redis = await self.connect()
         try:
-            items = await redis.lrange(settings.redis_queue_key, 0, -1)
+            items = await redis.lrange(await self._queue_key(), 0, -1)
         except RedisError:
             return None
         for index, raw in enumerate(items, start=1):
@@ -178,14 +187,15 @@ class RedisService:
         stale jobs from failing repeatedly.
         """
         redis = await self.connect()
-        count = int(await redis.llen(settings.redis_queue_key))
+        queue_key = await self._queue_key()
+        count = int(await redis.llen(queue_key))
         if count:
-            await redis.delete(settings.redis_queue_key)
+            await redis.delete(queue_key)
         return count
 
     async def dequeue(self, timeout: int | None = None) -> Optional[Dict[str, Any]]:
         redis = await self.connect()
-        item = await redis.blpop(settings.redis_queue_key, timeout=timeout or settings.worker_queue_timeout_seconds)
+        item = await redis.blpop(await self._queue_key(), timeout=timeout or settings.worker_queue_timeout_seconds)
         if not item:
             return None
         _, raw = item
@@ -204,7 +214,7 @@ class RedisService:
 
     async def queue_count(self) -> int:
         redis = await self.connect()
-        return int(await redis.llen(settings.redis_queue_key))
+        return int(await redis.llen(await self._queue_key()))
 
 
 redis_service = RedisService()

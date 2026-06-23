@@ -9,6 +9,7 @@ from typing import Tuple
 from telegram import Message
 
 from app.config import settings
+from app.services.runtime_settings import runtime_settings
 from app.services.video_service import get_media_duration
 from app.utils.file_utils import safe_suffix
 
@@ -33,14 +34,15 @@ def get_video_file_info(message: Message) -> Tuple[str, int | None, str, int | N
     raise ValueError("no_video")
 
 
-def get_srt_file_info(message: Message) -> Tuple[str, int | None, str]:
+async def get_srt_file_info(message: Message) -> Tuple[str, int | None, str]:
     if not message.document:
         raise ValueError("no_srt")
     doc = message.document
     filename = doc.file_name or "subtitle.srt"
     if Path(filename).suffix.lower() != ".srt":
         raise ValueError("not_srt")
-    if doc.file_size and doc.file_size > settings.max_srt_size_bytes:
+    max_srt_size_mb = await runtime_settings.get_int("max_srt_size_mb")
+    if doc.file_size and doc.file_size > max_srt_size_mb * 1024 * 1024:
         raise ValueError("srt_too_large")
     return doc.file_id, doc.file_size, filename
 
@@ -58,10 +60,14 @@ async def download_and_validate_video(message: Message, bot) -> dict:
     if suffix not in ALLOWED_VIDEO_SUFFIXES:
         raise ValueError("unsupported_video_format")
 
-    if file_size and file_size > settings.max_video_size_bytes:
+    runtime = await runtime_settings.load()
+    max_video_size_bytes = int(runtime["max_video_size_mb"]) * 1024 * 1024
+    max_video_duration_seconds = int(runtime["max_video_duration_seconds"])
+
+    if file_size and file_size > max_video_size_bytes:
         raise ValueError("video_too_large")
 
-    if telegram_duration and telegram_duration > settings.max_video_duration_seconds:
+    if telegram_duration and telegram_duration > max_video_duration_seconds:
         raise ValueError("video_too_long")
 
     local_name = f"{uuid.uuid4().hex}{suffix}"
@@ -72,12 +78,12 @@ async def download_and_validate_video(message: Message, bot) -> dict:
     if actual_size <= 0:
         path.unlink(missing_ok=True)
         raise ValueError("no_video")
-    if actual_size > settings.max_video_size_bytes:
+    if actual_size > max_video_size_bytes:
         path.unlink(missing_ok=True)
         raise ValueError("video_too_large")
 
     duration = await get_media_duration(path)
-    if duration > settings.max_video_duration_seconds + 0.5:
+    if duration > max_video_duration_seconds + 0.5:
         path.unlink(missing_ok=True)
         raise ValueError("video_too_long")
 
@@ -91,10 +97,11 @@ async def download_and_validate_video(message: Message, bot) -> dict:
 
 
 async def download_srt(message: Message, bot, task_id: str) -> dict:
-    file_id, file_size, filename = get_srt_file_info(message)
+    file_id, file_size, filename = await get_srt_file_info(message)
     path = settings.subtitles_dir / f"{task_id}.srt"
     await download_telegram_file(bot, file_id, path)
-    if path.stat().st_size > settings.max_srt_size_bytes:
+    max_srt_size_mb = await runtime_settings.get_int("max_srt_size_mb")
+    if path.stat().st_size > max_srt_size_mb * 1024 * 1024:
         path.unlink(missing_ok=True)
         raise ValueError("srt_too_large")
     return {"file_id": file_id, "file_size": path.stat().st_size, "filename": filename, "path": str(path)}

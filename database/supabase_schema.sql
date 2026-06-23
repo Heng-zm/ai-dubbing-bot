@@ -49,6 +49,33 @@ create table if not exists public.broadcasts (
     created_at timestamptz not null default now()
 );
 
+
+create table if not exists public.bot_settings (
+    key text primary key,
+    value text not null,
+    value_type text not null default 'str',
+    updated_by bigint,
+    updated_at timestamptz not null default now()
+);
+
+insert into public.bot_settings (key, value, value_type)
+values
+    ('max_video_duration_seconds', '60', 'int'),
+    ('max_video_size_mb', '50', 'int'),
+    ('max_srt_size_mb', '2', 'int'),
+    ('tts_provider', 'edge', 'choice'),
+    ('tts_cache_enabled', 'true', 'bool'),
+    ('keep_original_audio', 'false', 'bool'),
+    ('original_audio_volume', '0.0', 'float'),
+    ('dubbed_audio_volume', '1.0', 'float'),
+    ('in_process_worker', 'true', 'bool'),
+    ('in_process_worker_count', '1', 'int'),
+    ('clean_success_files', 'true', 'bool'),
+    ('keep_failed_files', 'true', 'bool'),
+    ('clear_stale_queue_on_start', 'true', 'bool'),
+    ('redis_queue_key', 'queue:dubbing', 'str')
+on conflict (key) do nothing;
+
 create table if not exists public.logs (
     id bigserial primary key,
     level text not null,
@@ -70,6 +97,7 @@ create index if not exists idx_dubbing_tasks_telegram_user_id on public.dubbing_
 create index if not exists idx_dubbing_tasks_created_at on public.dubbing_tasks(created_at desc);
 create index if not exists idx_dubbing_tasks_updated_at on public.dubbing_tasks(updated_at desc);
 create index if not exists idx_logs_created_at on public.logs(created_at desc);
+create index if not exists idx_bot_settings_updated_at on public.bot_settings(updated_at desc);
 
 create or replace function public.set_updated_at()
 returns trigger as $$

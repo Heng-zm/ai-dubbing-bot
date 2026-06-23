@@ -20,6 +20,7 @@ from telegram.ext import ContextTypes
 from app.config import settings
 from app.services.logger_service import log_db, logger
 from app.services.redis_service import redis_service
+from app.services.runtime_settings import runtime_settings
 from app.services.srt_parser import SubtitleItem, validate_srt_file
 from app.services.supabase_service import supabase_service
 from app.services.task_service import update_task_status
@@ -40,53 +41,64 @@ from app.states import (
 from app.utils.file_utils import delete_file
 from app.utils.text_utils import truncate
 from app.utils.time_utils import seconds_to_readable
+from app.utils.telegram_ui import percent_line, status_emoji, status_label, step_title
 
 
 def _khmer_video_error(code: str) -> str:
+    runtime = runtime_settings.cached()
+    max_size = runtime.get("max_video_size_mb", settings.max_video_size_mb)
+    max_duration = runtime.get("max_video_duration_seconds", settings.max_video_duration_seconds)
     messages = {
-        "unsupported_video_format": "សូមផ្ញើវីដេអូជា format mp4, mov, mkv ឬ webm ប៉ុណ្ណោះ។",
-        "video_too_large": f"វីដេអូធំពេក។ សូមផ្ញើឯកសារមិនលើស {settings.max_video_size_mb}MB។",
-        "video_too_long": "វីដេអូវែងពេក។ សូមផ្ញើវីដេអូដែលមានរយៈពេលមិនលើសពី 1 នាទី។",
+        "unsupported_video_format": (
+            "❌ Format វីដេអូមិនត្រឹមត្រូវទេ។\n\n"
+            "សូមផ្ញើវីដេអូជា mp4, mov, mkv ឬ webm ប៉ុណ្ណោះ។"
+        ),
+        "video_too_large": (
+            "❌ វីដេអូធំពេក។\n\n"
+            f"សូមផ្ញើឯកសារមិនលើស {max_size}MB។"
+        ),
+        "video_too_long": (
+            "❌ វីដេអូវែងពេក។\n\n"
+            f"សូមផ្ញើវីដេអូដែលមានរយៈពេលមិនលើស {max_duration} វិនាទី។"
+        ),
         "no_video": "សូមផ្ញើវីដេអូ ឬឯកសារវីដេអូ។",
     }
     return messages.get(code, "សូមទោស មិនអាចទទួលវីដេអូនេះបានទេ។ សូមព្យាយាមម្តងទៀត។")
 
-
 def _khmer_srt_error(code: str) -> str:
+    runtime = runtime_settings.cached()
+    max_srt_size = runtime.get("max_srt_size_mb", settings.max_srt_size_mb)
     messages = {
-        "no_srt": "សូមផ្ញើឯកសារ SRT ជា Document។",
-        "not_srt": "សូមផ្ញើឯកសារ .srt ប៉ុណ្ណោះ។",
-        "srt_too_large": f"ឯកសារ SRT ធំពេក។ សូមផ្ញើឯកសារមិនលើស {settings.max_srt_size_mb}MB។",
-        "invalid_srt": "ឯកសារ SRT មិនត្រឹមត្រូវ។ សូមពិនិត្យ format របស់វា។",
-        "invalid_srt_timing": "Timing នៅក្នុង SRT មិនត្រឹមត្រូវ។",
-        "subtitle_overlap": "Timing subtitle មានការជាន់គ្នា។ សូមកែ SRT ហើយផ្ញើម្តងទៀត។",
-        "subtitle_too_short": "Subtitle ខ្លីពេក។ សូមកែ timing ឱ្យបានត្រឹមត្រូវ។",
-        "empty_subtitle": "មាន subtitle ខ្លះគ្មានអក្សរ។ សូមកែ SRT ហើយផ្ញើម្តងទៀត។",
-        "subtitle_too_long": f"អក្សរ subtitle វែងពេក។ សូមកុំឱ្យលើស {settings.max_subtitle_chars} តួអក្សរក្នុងមួយបន្ទាត់។",
-        "srt_timing_exceeds_video": "Timing នៅក្នុង SRT លើសរយៈពេលវីដេអូ។ សូមពិនិត្យម្តងទៀត។",
+        "no_srt": "សូមផ្ញើឯកសារ .srt ជា Document។",
+        "not_srt": "❌ ឯកសារមិនមែនជា .srt ទេ។ សូមផ្ញើឯកសារ Subtitle ដែលបញ្ចប់ដោយ .srt។",
+        "srt_too_large": f"❌ ឯកសារ SRT ធំពេក។ សូមផ្ញើមិនលើស {max_srt_size}MB។",
+        "invalid_srt": "❌ Format SRT មិនត្រឹមត្រូវ។ សូមពិនិត្យលេខរៀង, timing និងអត្ថបទ។",
+        "invalid_srt_timing": "❌ Timing នៅក្នុង SRT មិនត្រឹមត្រូវ។",
+        "subtitle_overlap": "❌ Timing subtitle មានការជាន់គ្នា។ សូមកែ SRT ហើយផ្ញើម្តងទៀត។",
+        "subtitle_too_short": "❌ Subtitle ខ្លីពេក។ សូមកែ timing ឱ្យវែងជាងមុនបន្តិច។",
+        "empty_subtitle": "❌ មាន subtitle ខ្លះគ្មានអក្សរ។ សូមកែ SRT ហើយផ្ញើម្តងទៀត។",
+        "subtitle_too_long": f"❌ អក្សរ subtitle វែងពេក។ សូមកុំឱ្យលើស {settings.max_subtitle_chars} តួអក្សរក្នុងមួយប្លុក។",
+        "srt_timing_exceeds_video": "❌ Timing នៅក្នុង SRT លើសរយៈពេលវីដេអូ។ សូមពិនិត្យម្តងទៀត។",
     }
     return messages.get(code, "ឯកសារ SRT មិនត្រឹមត្រូវ។ សូមពិនិត្យ timing និង format របស់វា។")
-
 
 def _confirm_keyboard(task_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("ចាប់ផ្តើម Dubbing ✅", callback_data=f"dubbing:confirm:{task_id}")],
-            [InlineKeyboardButton("ផ្លាស់ប្តូរ SRT 🔁", callback_data=f"dubbing:change_srt:{task_id}")],
-            [InlineKeyboardButton("បោះបង់ ❌", callback_data=f"dubbing:cancel:{task_id}")],
+            [InlineKeyboardButton("✅ ចាប់ផ្តើម Dubbing", callback_data=f"dubbing:confirm:{task_id}")],
+            [InlineKeyboardButton("🔁 ផ្លាស់ប្តូរ SRT", callback_data=f"dubbing:change_srt:{task_id}")],
+            [InlineKeyboardButton("❌ បោះបង់", callback_data=f"dubbing:cancel:{task_id}")],
         ]
     )
-
 
 def retry_keyboard(task_id: str) -> InlineKeyboardMarkup:
     """Keyboard shown when a failed task can be resumed."""
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("ព្យាយាមម្តងទៀត 🔄", callback_data=f"dubbing:retry:{task_id}")],
-            [InlineKeyboardButton("ចាប់ផ្តើមថ្មី 🎬", callback_data="start_dubbing")],
+            [InlineKeyboardButton("🔄 ព្យាយាមម្តងទៀត", callback_data=f"dubbing:retry:{task_id}")],
+            [InlineKeyboardButton("🎬 ចាប់ផ្តើមថ្មី", callback_data="start_dubbing")],
         ]
     )
-
 
 def _format_srt_preview(items: list[SubtitleItem], video_duration: float, voice: str, queue_count: int) -> str:
     subtitle_count = len(items)
@@ -97,32 +109,38 @@ def _format_srt_preview(items: list[SubtitleItem], video_duration: float, voice:
 
     sample_lines: list[str] = []
     for item in items[:3]:
-        sample_lines.append(f"{item.index}. {truncate(item.text, 70)}")
+        sample_lines.append(f"{item.index}. {truncate(item.text, 72)}")
     sample = "\n".join(sample_lines) if sample_lines else "គ្មាន preview"
 
+    timing_ok = "ត្រឹមត្រូវ ✅" if last_end <= video_duration + 0.2 else "លើសវីដេអូ ⚠️"
     return (
-        "សូមពិនិត្យ SRT មុនពេលដំណើរការ 🎙️\n\n"
-        f"• ចំនួន Subtitle: {subtitle_count}\n"
-        f"• Timing ចុងក្រោយ: {seconds_to_readable(last_end)}\n"
+        f"{step_title(4, 4, 'ពិនិត្យ Subtitle Preview')}\n\n"
+        "សូមពិនិត្យព័ត៌មានខាងក្រោម មុនចាប់ផ្តើមដំណើរការ។\n\n"
+        "📋 ព័ត៌មានសង្ខេប\n"
+        f"• Subtitle: {subtitle_count} ប្លុក\n"
+        f"• Timing ចុងក្រោយ: {seconds_to_readable(last_end)} ({timing_ok})\n"
         f"• រយៈពេលវីដេអូ: {seconds_to_readable(video_duration)}\n"
         f"• សម្លេង: {voice_label}\n"
         f"• តួអក្សរសរុប: {total_chars}\n"
-        f"• ជួរដែលរំពឹងទុក: លេខ {estimated_position}\n\n"
-        "Preview:\n"
+        f"• Queue រំពឹងទុក: ជួរទី {estimated_position}\n\n"
+        "🔎 Preview 3 បន្ទាត់ដំបូង\n"
         f"{sample}\n\n"
-        "បើត្រឹមត្រូវ សូមចុច ចាប់ផ្តើម Dubbing ✅"
+        "បើគ្រប់យ៉ាងត្រឹមត្រូវ សូមចុច ✅ ចាប់ផ្តើម Dubbing។"
     )
-
 
 def _queue_text(position: int | None) -> str:
     if position and position > 1:
         return (
-            "Task របស់អ្នកត្រូវបានដាក់ចូល Queue ហើយ ✅\n\n"
-            f"ការងាររបស់អ្នកស្ថិតនៅជួរទី {position}។\n"
-            "កំពុងរង់ចាំដំណើរការ..."
+            "✅ បានដាក់ចូល Queue រួចហើយ\n\n"
+            f"⏳ ជួររបស់អ្នក: លេខ {position}\n"
+            "ខ្ញុំនឹងដំណើរការដោយស្វ័យប្រវត្តិ ពេលដល់វេនរបស់អ្នក។\n\n"
+            "ប្រើ /status ដើម្បីមើលស្ថានភាព។"
         )
-    return "កំពុងដំណើរការ AI Dubbing... សូមរង់ចាំបន្តិច 🙏"
-
+    return (
+        "⚙️ កំពុងចាប់ផ្តើម AI Dubbing...\n\n"
+        f"{percent_line(12)}\n"
+        "សូមរង់ចាំបន្តិច 🙏"
+    )
 
 def _user_can_access_task(task: dict[str, Any] | None, telegram_user_id: int) -> bool:
     if not task:
@@ -186,10 +204,10 @@ async def handle_video_or_document(update: Update, context: ContextTypes.DEFAULT
         await _handle_srt(update, context)
         return
     if state == STATE_PROCESSING:
-        await message.reply_text("Task របស់អ្នកកំពុងដំណើរការ។ សូមរង់ចាំ ឬប្រើ /status ដើម្បីមើលស្ថានភាព។")
+        await message.reply_text("⚙️ Task របស់អ្នកកំពុងដំណើរការ។ ប្រើ /status ដើម្បីមើលស្ថានភាព ឬ /cancel ដើម្បីបោះបង់។")
         return
 
-    await message.reply_text("សូមចុច /start រួចចុចប៊ូតុង សម្រាយរឿង ដើម្បីចាប់ផ្តើម។")
+    await message.reply_text("សូមចុច /start ដើម្បីចាប់ផ្តើម ឬ /help ដើម្បីមើលរបៀបប្រើ។")
 
 
 async def _handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -199,10 +217,10 @@ async def _handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     voice = await redis_service.get_user_voice(user.id)
     if not voice:
-        await message.reply_text("សូមជ្រើសរើសសម្លេង AI ជាមុនសិន។ ចុច /start ដើម្បីចាប់ផ្តើម។")
+        await message.reply_text("សូមជ្រើសសម្លេង AI ជាមុនសិន។ ចុច /start ដើម្បីចាប់ផ្តើម។")
         return
 
-    progress_msg = await message.reply_text("កំពុងរៀបចំឯកសារ... 10%")
+    progress_msg = await message.reply_text(f"{step_title(3, 4, 'កំពុងទទួលវីដេអូ')}\n\n{percent_line(10)}\nកំពុងពិនិត្យវីដេអូ...")
     video_path: str | None = None
     try:
         user_row = await supabase_service.upsert_user(user, selected_voice=voice)
@@ -236,7 +254,7 @@ async def _handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             },
         )
         await redis_service.set_task_status(task_id, TASK_WAITING_SRT, 10)
-        await progress_msg.edit_text("វីដេអូបានទទួលហើយ ✅\n\nសូមផ្ញើឯកសារ SRT សម្រាប់វីដេអូនេះ។")
+        await progress_msg.edit_text(f"✅ វីដេអូបានទទួលហើយ\n\n{step_title(3, 4, 'ផ្ញើឯកសារ SRT')}\n\nសូមផ្ញើឯកសារ Subtitle .srt ជា Document។\nបន្ទាប់ពីផ្ញើ Bot នឹងបង្ហាញ Preview មុនដំណើរការ។")
     except ValueError as exc:
         delete_file(video_path)
         await progress_msg.edit_text(_khmer_video_error(str(exc)))
@@ -244,7 +262,7 @@ async def _handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.exception("Video handling failed: %s", exc)
         delete_file(video_path)
         await log_db("error", "video_upload", "Video upload failed", {"user": user.id, "error": str(exc)})
-        await progress_msg.edit_text("សូមទោស មានបញ្ហាក្នុងការទាញយកវីដេអូ។ សូមព្យាយាមម្តងទៀត។")
+        await progress_msg.edit_text("សូមទោស មិនអាចទាញយកវីដេអូបានទេ។ សូមព្យាយាមផ្ញើម្តងទៀត។")
 
 
 async def _handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -254,7 +272,7 @@ async def _handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     task_id = await redis_service.get_user_task(user.id)
     if not task_id:
-        await message.reply_text("រកមិនឃើញ Task របស់អ្នកទេ។ សូមចាប់ផ្តើមម្តងទៀតដោយចុច /start។")
+        await message.reply_text("រកមិនឃើញ Task របស់អ្នកទេ។ សូមចុច /start ដើម្បីចាប់ផ្តើមថ្មី។")
         return
 
     meta = await redis_service.get_task_meta(task_id)
@@ -270,7 +288,7 @@ async def _handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await redis_service.set_user_state(user.id, STATE_IDLE)
         await redis_service.delete(f"user:{user.id}:task")
         await message.reply_text(
-            "Task ចាស់នេះរកវីដេអូមិនឃើញទេ។ សូមចាប់ផ្តើមម្តងទៀតដោយចុច /start ហើយផ្ញើវីដេអូថ្មី។"
+            "Task ចាស់នេះរកវីដេអូមិនឃើញទេ។ សូមចុច /start ហើយផ្ញើវីដេអូថ្មីម្តងទៀត។"
         )
         return
 
@@ -322,7 +340,7 @@ async def _handle_srt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.exception("SRT handling failed: %s", exc)
         delete_file(srt_path)
         await log_db("error", "srt_upload", "SRT upload failed", {"user": user.id, "task_id": task_id, "error": str(exc)})
-        await message.reply_text("សូមទោស មិនអាចទទួលឯកសារ SRT បានទេ។ សូមព្យាយាមម្តងទៀត។")
+        await message.reply_text("សូមទោស មិនអាចទទួលឯកសារ SRT បានទេ។ សូមព្យាយាមផ្ញើម្តងទៀត។")
 
 
 async def dubbing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -335,7 +353,7 @@ async def dubbing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     parts = (query.data or "").split(":", 2)
     if len(parts) < 3:
-        await query.edit_message_text("Callback មិនត្រឹមត្រូវ។ សូមចុច /start ម្តងទៀត។")
+        await query.edit_message_text("សំណើនេះមិនត្រឹមត្រូវទេ។ សូមចុច /start ម្តងទៀត។")
         return
 
     action, task_id = parts[1], parts[2]
@@ -348,7 +366,7 @@ async def dubbing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif action == "retry":
         await _retry_failed_task(query, user.id, task_id)
     else:
-        await query.edit_message_text("Action មិនត្រឹមត្រូវ។ សូមចុច /start ម្តងទៀត។")
+        await query.edit_message_text("Action នេះមិនត្រឹមត្រូវទេ។ សូមចុច /start ម្តងទៀត។")
 
 
 async def _confirm_task(query, telegram_user_id: int) -> None:
@@ -375,7 +393,7 @@ async def _confirm_task(query, telegram_user_id: int) -> None:
         await redis_service.set_user_state(telegram_user_id, STATE_IDLE)
         await redis_service.delete(f"user:{telegram_user_id}:task")
         await query.edit_message_text(
-            "សូមទោស រកឯកសារ video/SRT មិនឃើញទេ។ សូមចាប់ផ្តើមថ្មីដោយចុច /start។"
+            "សូមទោស រកឯកសារ Video/SRT មិនឃើញទេ។ សូមចុច /start ដើម្បីចាប់ផ្តើមថ្មី។"
         )
         return
 
@@ -429,7 +447,7 @@ async def _change_srt(query, telegram_user_id: int, task_id: str) -> None:
             "error_message": None,
         },
     )
-    await query.edit_message_text("សូមផ្ញើឯកសារ SRT ថ្មីសម្រាប់វីដេអូនេះ។")
+    await query.edit_message_text("🔁 សូមផ្ញើឯកសារ SRT ថ្មីសម្រាប់វីដេអូនេះ។")
 
 
 async def _cancel_task_from_button(query, telegram_user_id: int, task_id: str) -> None:
@@ -446,7 +464,7 @@ async def _cancel_task_from_button(query, telegram_user_id: int, task_id: str) -
     await update_task_status(task_id, TASK_CANCELLED, progress=0, error_message="Cancelled by user before processing", mark_finished=True)
     await redis_service.set_user_state(telegram_user_id, STATE_IDLE)
     await redis_service.delete(f"user:{telegram_user_id}:task")
-    await query.edit_message_text("Task ត្រូវបានបោះបង់ហើយ។ ចុច /start ដើម្បីចាប់ផ្តើមម្តងទៀត។")
+    await query.edit_message_text("✅ បានបោះបង់ Task រួចហើយ។ ចុច /start ដើម្បីចាប់ផ្តើមថ្មី។")
 
 
 async def _retry_failed_task(query, telegram_user_id: int, task_id: str) -> None:
@@ -504,23 +522,28 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     task_id = await redis_service.get_user_task(user.id)
     if not task_id:
-        await message.reply_text("អ្នកមិនមាន Task កំពុងដំណើរការទេ។ ចុច /start ដើម្បីចាប់ផ្តើម។")
+        await message.reply_text(
+            "ℹ️ អ្នកមិនមាន Task កំពុងដំណើរការទេ។\n\n"
+            "ចុច /start ដើម្បីចាប់ផ្តើម Dubbing ថ្មី។"
+        )
         return
     status = await redis_service.get_task_status(task_id)
     if not status:
         task = await supabase_service.get_task(task_id)
         status = {"status": task.get("status", "unknown"), "progress": str(task.get("progress", 0))} if task else {}
 
+    raw_status = status.get("status", "unknown")
+    progress = status.get("progress", "0")
     queue_position = await redis_service.queue_position(task_id)
-    position_line = f"\n• Queue position: {queue_position}" if queue_position else ""
+    position_line = f"\n⏳ Queue: ជួរទី {queue_position}" if queue_position else ""
     await message.reply_text(
-        f"ស្ថានភាព Task:\n"
-        f"• ID: {task_id[:8]}\n"
-        f"• Status: {status.get('status', 'unknown')}\n"
-        f"• Progress: {status.get('progress', '0')}%"
-        f"{position_line}"
+        f"{status_emoji(raw_status)} ស្ថានភាព Task\n\n"
+        f"🆔 ID: {task_id[:8]}\n"
+        f"📌 Status: {status_label(raw_status)}\n"
+        f"📊 Progress: {percent_line(progress)}"
+        f"{position_line}\n\n"
+        "ប្រើ /cancel ប្រសិនបើចង់បោះបង់ Task នេះ។"
     )
-
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -534,4 +557,4 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update_task_status(task_id, TASK_CANCELLED, progress=0, error_message="Cancelled by user", mark_finished=True)
     await redis_service.set_user_state(user.id, STATE_IDLE)
     await redis_service.delete(f"user:{user.id}:task")
-    await message.reply_text("Task ត្រូវបានបោះបង់ហើយ។ ចុច /start ដើម្បីចាប់ផ្តើមម្តងទៀត។")
+    await message.reply_text("✅ បានបោះបង់ Task រួចហើយ។ ចុច /start ដើម្បីចាប់ផ្តើមថ្មី។")
