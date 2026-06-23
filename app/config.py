@@ -82,6 +82,11 @@ class Settings:
     progress_edit_interval_seconds: float
     ffmpeg_binary: str
     ffprobe_binary: str
+    in_process_worker: bool
+    in_process_worker_count: int
+    enable_health_server: bool
+    health_server_host: str
+    health_server_port: int
 
     @property
     def max_video_size_bytes(self) -> int:
@@ -126,4 +131,9 @@ settings = Settings(
     progress_edit_interval_seconds=_get_float("PROGRESS_EDIT_INTERVAL_SECONDS", 2.0),
     ffmpeg_binary=os.getenv("FFMPEG_BINARY", "ffmpeg"),
     ffprobe_binary=os.getenv("FFPROBE_BINARY", "ffprobe"),
+    in_process_worker=_get_bool("IN_PROCESS_WORKER", True),
+    in_process_worker_count=max(1, _get_int("IN_PROCESS_WORKER_COUNT", 1)),
+    enable_health_server=_get_bool("ENABLE_HEALTH_SERVER", False),
+    health_server_host=os.getenv("HEALTH_SERVER_HOST", "0.0.0.0"),
+    health_server_port=_get_int("PORT", _get_int("HEALTH_SERVER_PORT", 10000)),
 )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from app.config import settings
@@ -9,6 +11,7 @@ from app.handlers.admin import admin_callback, admin_command, handle_admin_text
 from app.handlers.dubbing import handle_video_or_document
 from app.handlers.errors import error_handler
 from app.handlers.start import start_command, start_dubbing_callback, voice_callback
+from app.services.health_server import start_health_server, stop_health_server
 from app.services.logger_service import logger
 from app.services.redis_service import redis_service
 from app.services.supabase_service import supabase_service
@@ -25,8 +28,33 @@ async def _post_init(application: Application) -> None:
     if not supabase_ok:
         raise RuntimeError("Supabase connection failed. Run database/supabase_schema.sql and check .env")
 
+    # Optional health server is useful when deploying this polling bot as a
+    # single Render Web Service. For a Render Background Worker, keep it off.
+    application.bot_data["health_server"] = start_health_server()
+
+    # Single-service mode: consume Redis dubbing jobs from inside the Telegram
+    # bot process, so no separate Render worker service is required.
+    if settings.in_process_worker:
+        from app.workers.dubbing_worker import worker_loop
+
+        worker_tasks = []
+        for index in range(settings.in_process_worker_count):
+            task = asyncio.create_task(
+                worker_loop(application.bot, name=f"in-process-dubbing-worker-{index + 1}")
+            )
+            worker_tasks.append(task)
+        application.bot_data["worker_tasks"] = worker_tasks
+        logger.info("Started %s in-process dubbing worker(s)", len(worker_tasks))
+
 
 async def _post_shutdown(application: Application) -> None:
+    worker_tasks = application.bot_data.get("worker_tasks", [])
+    for task in worker_tasks:
+        task.cancel()
+    if worker_tasks:
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
+
+    stop_health_server(application.bot_data.get("health_server"))
     await redis_service.close()
     logger.info("Bot shutdown complete")
 

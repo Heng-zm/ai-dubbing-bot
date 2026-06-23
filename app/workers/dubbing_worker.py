@@ -136,6 +136,30 @@ async def process_task(bot: Bot, payload: Dict[str, Any]) -> None:
             clean_task_files([video_path, srt_path, output_path])
 
 
+async def worker_loop(bot: Bot, name: str = "dubbing-worker") -> None:
+    """Continuously consume Redis queue jobs.
+
+    This function is used both by the standalone worker command and by the
+    in-process Render single-service mode. It never blocks Telegram updates
+    because every long ffmpeg subprocess runs via asyncio.to_thread and all
+    Telegram/Redis/Supabase calls are async.
+    """
+    logger.info("%s started. Queue=%s", name, settings.redis_queue_key)
+    while True:
+        try:
+            payload = await redis_service.dequeue(timeout=2)
+            if payload is None:
+                continue
+            logger.info("%s processing task %s", name, payload.get("task_id"))
+            await process_task(bot, payload)
+        except asyncio.CancelledError:
+            logger.info("%s stopped", name)
+            raise
+        except Exception as exc:
+            logger.exception("%s loop error: %s", name, exc)
+            await asyncio.sleep(2)
+
+
 async def worker_main() -> None:
     settings.ensure_dirs()
     check_ffmpeg_available()
@@ -148,21 +172,8 @@ async def worker_main() -> None:
     if not supabase_ok:
         raise RuntimeError("Supabase connection failed")
 
-    logger.info("Dubbing worker started. Queue=%s", settings.redis_queue_key)
     async with Bot(token=settings.bot_token) as bot:
-        while True:
-            try:
-                payload = await redis_service.dequeue(timeout=5)
-                if payload is None:
-                    continue
-                logger.info("Processing task %s", payload.get("task_id"))
-                await process_task(bot, payload)
-            except asyncio.CancelledError:
-                raise
-            except KeyboardInterrupt:
-                break
-            except Exception as exc:
-                logger.exception("Worker loop error: %s", exc)
-                await asyncio.sleep(2)
-
-    await redis_service.close()
+        try:
+            await worker_loop(bot, name="standalone-dubbing-worker")
+        finally:
+            await redis_service.close()
