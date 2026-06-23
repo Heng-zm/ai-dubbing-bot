@@ -36,6 +36,9 @@ class UserCancelledTask(RuntimeError):
 
 
 async def _raise_if_cancelled(task_id: str) -> None:
+    # Keep the worker lock alive during long TTS/audio stages and stop quickly
+    # when a user/admin cancels. Refreshing a missing key is harmless.
+    await redis_service.refresh_task_lock(task_id)
     status = await redis_service.get_task_status(task_id)
     if status.get("status") == TASK_CANCELLED:
         raise UserCancelledTask("Task cancelled by user/admin")
@@ -55,7 +58,15 @@ class ProgressReporter:
 
     async def edit(self, percent: int, text: str, force: bool = False) -> None:
         percent = max(0, min(100, int(percent)))
-        await redis_service.set_task_status(self.task_id, TASK_PROCESSING, percent)
+        current = await redis_service.get_task_status(self.task_id)
+        current_status = current.get("status")
+        if current_status == TASK_CANCELLED:
+            raise UserCancelledTask("Task cancelled by user/admin")
+        # Do not overwrite terminal statuses. The old code changed Redis from
+        # completed/failed/cancelled back to processing when editing the final
+        # progress message.
+        if current_status not in {TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED}:
+            await redis_service.set_task_status(self.task_id, TASK_PROCESSING, percent)
         now = time.monotonic()
         should_edit = (
             force
@@ -127,8 +138,18 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
     task_id = str(payload["task_id"])
     owner = f"{worker_name}:{id(asyncio.current_task())}"
     if not await redis_service.acquire_task_lock(task_id, owner):
-        logger.warning("Task %s is already locked by another worker. Requeueing once.", task_id)
-        asyncio.create_task(redis_service.requeue_later(payload, delay_seconds=5))
+        current_status = await redis_service.get_task_status(task_id)
+        if current_status.get("status") in {TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED}:
+            logger.info("Dropping duplicate locked job for terminal task %s", task_id)
+            return
+        requeues = int(payload.get("_lock_requeues") or 0)
+        if requeues >= 5:
+            logger.warning("Task %s stayed locked after %s requeues; dropping duplicate queue job.", task_id, requeues)
+            return
+        logger.warning("Task %s is already locked by another worker. Requeueing after delay (%s/5).", task_id, requeues + 1)
+        new_payload = dict(payload)
+        new_payload["_lock_requeues"] = requeues + 1
+        asyncio.create_task(redis_service.requeue_later(new_payload, delay_seconds=5))
         return
 
     chat_id = int(payload["chat_id"])
@@ -140,8 +161,8 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
 
     try:
         current_status = await redis_service.get_task_status(task_id)
-        if current_status.get("status") == "cancelled":
-            logger.info("Skipping cancelled task %s", task_id)
+        if current_status.get("status") in {TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED}:
+            logger.info("Skipping terminal task %s with status=%s", task_id, current_status.get("status"))
             return
 
         video_path = _require_payload_path(payload, "video_path")

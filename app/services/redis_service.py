@@ -137,6 +137,23 @@ class RedisService:
         if current == owner:
             await redis.delete(key)
 
+    async def acquire_enqueue_lock(self, task_id: str, owner: str, ttl_seconds: int = 30) -> bool:
+        """Acquire a short lock around queue confirmation/retry.
+
+        Telegram users can tap inline buttons more than once, and PTB can process
+        callback updates concurrently. This lock makes the status re-check and
+        enqueue operation effectively single-flight for one task.
+        """
+        redis = await self.connect()
+        return bool(await redis.set(f"task:{task_id}:enqueue_lock", owner, nx=True, ex=max(5, ttl_seconds)))
+
+    async def release_enqueue_lock(self, task_id: str, owner: str) -> None:
+        redis = await self.connect()
+        key = f"task:{task_id}:enqueue_lock"
+        current = await redis.get(key)
+        if current == owner:
+            await redis.delete(key)
+
     async def _queue_key(self) -> str:
         try:
             from app.services.runtime_settings import runtime_settings

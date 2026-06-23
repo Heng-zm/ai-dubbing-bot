@@ -468,77 +468,91 @@ async def dubbing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def _confirm_task(query, telegram_user_id: int) -> None:
     task_id = (query.data or "").split(":", 2)[2]
-    task = await supabase_service.get_task(task_id)
-    if not _user_can_access_task(task, telegram_user_id):
-        await query.edit_message_text("អ្នកមិនមានសិទ្ធិដំណើរការ Task នេះទេ។")
-        return
-
-    task_status = str((task or {}).get("status") or "")
-    redis_status = await redis_service.get_task_status(task_id)
-    effective_status = redis_status.get("status") or task_status
-    if effective_status in {TASK_QUEUED, TASK_PROCESSING, TASK_COMPLETED}:
+    owner = f"confirm:{telegram_user_id}:{query.id}"
+    if not await redis_service.acquire_enqueue_lock(task_id, owner, ttl_seconds=30):
+        redis_status = await redis_service.get_task_status(task_id)
         queue_position = await redis_service.queue_position(task_id)
-        progress = redis_status.get("progress") or (task or {}).get("progress") or 0
-        await query.edit_message_text(_already_started_text(effective_status, progress, queue_position))
-        return
-
-    meta = await redis_service.get_task_meta(task_id)
-    video_path = meta.get("video_path") or (task or {}).get("video_file_path")
-    srt_path = meta.get("srt_path") or (task or {}).get("srt_file_path")
-    voice = meta.get("voice") or (task or {}).get("voice") or await redis_service.get_user_voice(telegram_user_id) or ""
-    video_duration = float(meta.get("video_duration") or (task or {}).get("video_duration") or 0)
-
-    if not video_path or not srt_path or not Path(str(video_path)).exists() or not Path(str(srt_path)).exists():
-        await update_task_status(
-            task_id,
-            TASK_FAILED,
-            progress=0,
-            error_message="Task files missing before confirmation; likely Render temp cleanup or redeploy.",
-            mark_finished=True,
-        )
-        await redis_service.set_user_state(telegram_user_id, STATE_IDLE)
-        await redis_service.delete(f"user:{telegram_user_id}:task")
         await query.edit_message_text(
-            "សូមទោស រកឯកសារ Video/SRT មិនឃើញទេ។ សូមចុច /start ដើម្បីចាប់ផ្តើមថ្មី។"
+            _already_started_text(redis_status.get("status", TASK_QUEUED), redis_status.get("progress", 12), queue_position)
         )
         return
 
-    await supabase_service.update_task(
-        task_id,
-        {
-            "status": TASK_QUEUED,
-            "progress": 12,
-            "error_message": None,
-        },
-    )
-    await redis_service.set_task_status(task_id, TASK_QUEUED, 12)
-    await redis_service.set_user_task(telegram_user_id, task_id)
-    await redis_service.set_user_state(telegram_user_id, STATE_PROCESSING)
+    try:
+        task = await supabase_service.get_task(task_id)
+        if not _user_can_access_task(task, telegram_user_id):
+            await query.edit_message_text("អ្នកមិនមានសិទ្ធិដំណើរការ Task នេះទេ។")
+            return
 
-    subtitle_count = int(meta.get("subtitle_count") or 0)
-    subtitle_chars = int(meta.get("subtitle_chars") or 0)
-    runtime = await runtime_settings.load()
-    estimate = estimate_processing_time(
-        video_duration=video_duration,
-        subtitle_count=subtitle_count,
-        total_chars=subtitle_chars,
-        queue_count=await redis_service.queue_count(),
-        provider=str(runtime.get("tts_provider", settings.tts_provider)),
-    )
-    estimate_text = format_processing_estimate(estimate) if bool(runtime.get("show_processing_estimate", True)) else None
-    position = await _enqueue_task(
-        task_id=task_id,
-        telegram_user_id=telegram_user_id,
-        chat_id=query.message.chat_id,
-        voice=voice,
-        video_path=str(video_path),
-        srt_path=str(srt_path),
-        video_duration=video_duration,
-        progress_message_id=query.message.message_id,
-        estimated_seconds=estimate.total_seconds,
-    )
-    await query.edit_message_text(_queue_text(position, estimate_text))
+        # Re-check after the lock is acquired. This closes the race where two
+        # callback updates both read waiting_srt before either one enqueues.
+        task_status = str((task or {}).get("status") or "")
+        redis_status = await redis_service.get_task_status(task_id)
+        effective_status = redis_status.get("status") or task_status
+        if effective_status in {TASK_QUEUED, TASK_PROCESSING, TASK_COMPLETED}:
+            queue_position = await redis_service.queue_position(task_id)
+            progress = redis_status.get("progress") or (task or {}).get("progress") or 0
+            await query.edit_message_text(_already_started_text(effective_status, progress, queue_position))
+            return
 
+        meta = await redis_service.get_task_meta(task_id)
+        video_path = meta.get("video_path") or (task or {}).get("video_file_path")
+        srt_path = meta.get("srt_path") or (task or {}).get("srt_file_path")
+        voice = meta.get("voice") or (task or {}).get("voice") or await redis_service.get_user_voice(telegram_user_id) or ""
+        video_duration = float(meta.get("video_duration") or (task or {}).get("video_duration") or 0)
+
+        if not video_path or not srt_path or not Path(str(video_path)).exists() or not Path(str(srt_path)).exists():
+            await update_task_status(
+                task_id,
+                TASK_FAILED,
+                progress=0,
+                error_message="Task files missing before confirmation; likely Render temp cleanup or redeploy.",
+                mark_finished=True,
+            )
+            await redis_service.set_user_state(telegram_user_id, STATE_IDLE)
+            await redis_service.delete(f"user:{telegram_user_id}:task")
+            await query.edit_message_text(
+                "សូមទោស រកឯកសារ Video/SRT មិនឃើញទេ។ សូមចុច /start ដើម្បីចាប់ផ្តើមថ្មី។"
+            )
+            return
+
+        subtitle_count = int(meta.get("subtitle_count") or 0)
+        subtitle_chars = int(meta.get("subtitle_chars") or 0)
+        runtime = await runtime_settings.load()
+        estimate = estimate_processing_time(
+            video_duration=video_duration,
+            subtitle_count=subtitle_count,
+            total_chars=subtitle_chars,
+            queue_count=await redis_service.queue_count(),
+            provider=str(runtime.get("tts_provider", settings.tts_provider)),
+        )
+        estimate_text = format_processing_estimate(estimate) if bool(runtime.get("show_processing_estimate", True)) else None
+
+        await supabase_service.update_task(
+            task_id,
+            {
+                "status": TASK_QUEUED,
+                "progress": 12,
+                "error_message": None,
+            },
+        )
+        await redis_service.set_task_status(task_id, TASK_QUEUED, 12)
+        await redis_service.set_user_task(telegram_user_id, task_id)
+        await redis_service.set_user_state(telegram_user_id, STATE_PROCESSING)
+
+        position = await _enqueue_task(
+            task_id=task_id,
+            telegram_user_id=telegram_user_id,
+            chat_id=query.message.chat_id,
+            voice=voice,
+            video_path=str(video_path),
+            srt_path=str(srt_path),
+            video_duration=video_duration,
+            progress_message_id=query.message.message_id,
+            estimated_seconds=estimate.total_seconds,
+        )
+        await query.edit_message_text(_queue_text(position, estimate_text))
+    finally:
+        await redis_service.release_enqueue_lock(task_id, owner)
 
 async def _change_srt(query, telegram_user_id: int, task_id: str) -> None:
     current_task = await redis_service.get_user_task(telegram_user_id)
@@ -587,66 +601,84 @@ async def _cancel_task_from_button(query, telegram_user_id: int, task_id: str) -
 
 
 async def _retry_failed_task(query, telegram_user_id: int, task_id: str) -> None:
-    task = await supabase_service.get_task(task_id)
-    if not _user_can_access_task(task, telegram_user_id):
-        await query.edit_message_text("អ្នកមិនមានសិទ្ធិ Retry Task នេះទេ។")
-        return
-    if (task or {}).get("status") not in {TASK_FAILED, TASK_CANCELLED}:
-        await query.edit_message_text("Task នេះមិនមែនជា Failed Task ទេ។ ប្រើ /status ដើម្បីមើលស្ថានភាព។")
-        return
-
-    video_path = str((task or {}).get("video_file_path") or "")
-    srt_path = str((task or {}).get("srt_file_path") or "")
-    if not video_path or not srt_path or not Path(video_path).exists() or not Path(srt_path).exists():
+    owner = f"retry:{telegram_user_id}:{query.id}"
+    if not await redis_service.acquire_enqueue_lock(task_id, owner, ttl_seconds=30):
+        redis_status = await redis_service.get_task_status(task_id)
+        queue_position = await redis_service.queue_position(task_id)
         await query.edit_message_text(
-            "មិនអាចព្យាយាមម្តងទៀតបានទេ ព្រោះឯកសារ video/SRT មិនមាននៅលើ server ទៀតហើយ។\n\n"
-            "សូមចុច /start ហើយផ្ញើវីដេអូ + SRT ម្តងទៀត។"
+            _already_started_text(redis_status.get("status", TASK_QUEUED), redis_status.get("progress", 12), queue_position)
         )
         return
 
-    voice = str((task or {}).get("voice") or await redis_service.get_user_voice(telegram_user_id) or "")
-    video_duration = float((task or {}).get("video_duration") or 0)
-    await redis_service.remove_task_from_queue(task_id)
-    await supabase_service.update_task(
-        task_id,
-        {
-            "status": TASK_QUEUED,
-            "progress": 12,
-            "error_message": None,
-            "output_file_path": None,
-            "started_at": None,
-            "completed_at": None,
-        },
-    )
-    await redis_service.set_task_status(task_id, TASK_QUEUED, 12)
-    await redis_service.set_user_task(telegram_user_id, task_id)
-    await redis_service.set_user_state(telegram_user_id, STATE_PROCESSING)
+    try:
+        task = await supabase_service.get_task(task_id)
+        if not _user_can_access_task(task, telegram_user_id):
+            await query.edit_message_text("អ្នកមិនមានសិទ្ធិ Retry Task នេះទេ។")
+            return
 
-    meta = await redis_service.get_task_meta(task_id)
-    subtitle_count = int(meta.get("subtitle_count") or 0)
-    subtitle_chars = int(meta.get("subtitle_chars") or 0)
-    runtime = await runtime_settings.load()
-    estimate = estimate_processing_time(
-        video_duration=video_duration,
-        subtitle_count=subtitle_count,
-        total_chars=subtitle_chars,
-        queue_count=await redis_service.queue_count(),
-        provider=str(runtime.get("tts_provider", settings.tts_provider)),
-    )
-    estimate_text = format_processing_estimate(estimate) if bool(runtime.get("show_processing_estimate", True)) else None
-    position = await _enqueue_task(
-        task_id=task_id,
-        telegram_user_id=telegram_user_id,
-        chat_id=query.message.chat_id,
-        voice=voice,
-        video_path=video_path,
-        srt_path=srt_path,
-        video_duration=video_duration,
-        progress_message_id=query.message.message_id,
-        estimated_seconds=estimate.total_seconds,
-    )
-    await query.edit_message_text(_queue_text(position, estimate_text))
+        redis_status = await redis_service.get_task_status(task_id)
+        effective_status = redis_status.get("status") or (task or {}).get("status")
+        if effective_status in {TASK_QUEUED, TASK_PROCESSING}:
+            queue_position = await redis_service.queue_position(task_id)
+            await query.edit_message_text(_already_started_text(effective_status, redis_status.get("progress", 12), queue_position))
+            return
+        if (task or {}).get("status") not in {TASK_FAILED, TASK_CANCELLED}:
+            await query.edit_message_text("Task នេះមិនមែនជា Failed Task ទេ។ ប្រើ /status ដើម្បីមើលស្ថានភាព។")
+            return
 
+        video_path = str((task or {}).get("video_file_path") or "")
+        srt_path = str((task or {}).get("srt_file_path") or "")
+        if not video_path or not srt_path or not Path(video_path).exists() or not Path(srt_path).exists():
+            await query.edit_message_text(
+                "មិនអាចព្យាយាមម្តងទៀតបានទេ ព្រោះឯកសារ video/SRT មិនមាននៅលើ server ទៀតហើយ។\n\n"
+                "សូមចុច /start ហើយផ្ញើវីដេអូ + SRT ម្តងទៀត។"
+            )
+            return
+
+        voice = str((task or {}).get("voice") or await redis_service.get_user_voice(telegram_user_id) or "")
+        video_duration = float((task or {}).get("video_duration") or 0)
+        await redis_service.remove_task_from_queue(task_id)
+        await supabase_service.update_task(
+            task_id,
+            {
+                "status": TASK_QUEUED,
+                "progress": 12,
+                "error_message": None,
+                "output_file_path": None,
+                "started_at": None,
+                "completed_at": None,
+            },
+        )
+        await redis_service.set_task_status(task_id, TASK_QUEUED, 12)
+        await redis_service.set_user_task(telegram_user_id, task_id)
+        await redis_service.set_user_state(telegram_user_id, STATE_PROCESSING)
+
+        meta = await redis_service.get_task_meta(task_id)
+        subtitle_count = int(meta.get("subtitle_count") or 0)
+        subtitle_chars = int(meta.get("subtitle_chars") or 0)
+        runtime = await runtime_settings.load()
+        estimate = estimate_processing_time(
+            video_duration=video_duration,
+            subtitle_count=subtitle_count,
+            total_chars=subtitle_chars,
+            queue_count=await redis_service.queue_count(),
+            provider=str(runtime.get("tts_provider", settings.tts_provider)),
+        )
+        estimate_text = format_processing_estimate(estimate) if bool(runtime.get("show_processing_estimate", True)) else None
+        position = await _enqueue_task(
+            task_id=task_id,
+            telegram_user_id=telegram_user_id,
+            chat_id=query.message.chat_id,
+            voice=voice,
+            video_path=video_path,
+            srt_path=srt_path,
+            video_duration=video_duration,
+            progress_message_id=query.message.message_id,
+            estimated_seconds=estimate.total_seconds,
+        )
+        await query.edit_message_text(_queue_text(position, estimate_text))
+    finally:
+        await redis_service.release_enqueue_lock(task_id, owner)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
