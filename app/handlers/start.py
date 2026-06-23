@@ -5,6 +5,7 @@ from __future__ import annotations
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from app.services.logger_service import logger
 from app.services.redis_service import redis_service
 from app.services.supabase_service import supabase_service
 from app.states import STATE_WAITING_VIDEO, VOICE_FEMALE, VOICE_MALE
@@ -13,14 +14,13 @@ from app.states import STATE_WAITING_VIDEO, VOICE_FEMALE, VOICE_MALE
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if user:
+        await redis_service.clear_user_flow(user.id)
         try:
             await supabase_service.upsert_user(user)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Could not upsert user on /start: %s", exc)
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("សម្រាយរឿង", callback_data="start_dubbing")]]
-    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("សម្រាយរឿង", callback_data="start_dubbing")]])
     text = (
         "សូមស្វាគមន៍មកកាន់ Bot បញ្ចូលសម្លេងរឿង AI Dubbing 🎙️\n\n"
         "• អាច Upload វីដេអូបានអតិបរមា 1 នាទី\n"
@@ -53,14 +53,16 @@ async def voice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not user:
         return
     voice = query.data.split(":", 1)[1]
+    if voice not in {VOICE_MALE, VOICE_FEMALE}:
+        await query.edit_message_text("សម្លេងដែលបានជ្រើសមិនត្រឹមត្រូវ។ សូមចុច /start ម្តងទៀត។")
+        return
+
     await redis_service.set_user_voice(user.id, voice)
     await redis_service.set_user_state(user.id, STATE_WAITING_VIDEO)
     try:
         await supabase_service.upsert_user(user, selected_voice=voice)
         await supabase_service.update_user_voice(user.id, voice)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not save selected voice: %s", exc)
 
-    await query.edit_message_text(
-        "សូមផ្ញើវីដេអូរបស់អ្នក។ វីដេអូត្រូវមានរយៈពេលមិនលើសពី 1 នាទី។"
-    )
+    await query.edit_message_text("សូមផ្ញើវីដេអូរបស់អ្នក។ វីដេអូត្រូវមានរយៈពេលមិនលើសពី 1 នាទី។")

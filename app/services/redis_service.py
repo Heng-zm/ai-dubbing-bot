@@ -6,6 +6,7 @@ import json
 from typing import Any, Dict, Optional
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.config import settings
 
@@ -16,12 +17,22 @@ class RedisService:
 
     async def connect(self) -> Redis:
         if self.redis is None:
-            self.redis = Redis.from_url(settings.redis_url, decode_responses=True)
+            self.redis = Redis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+                socket_timeout=settings.redis_socket_timeout_seconds,
+                socket_connect_timeout=settings.redis_socket_timeout_seconds,
+                health_check_interval=30,
+                retry_on_timeout=True,
+            )
         return self.redis
 
     async def ping(self) -> bool:
-        redis = await self.connect()
-        return bool(await redis.ping())
+        try:
+            redis = await self.connect()
+            return bool(await redis.ping())
+        except RedisError:
+            return False
 
     async def close(self) -> None:
         if self.redis is not None:
@@ -32,19 +43,36 @@ class RedisService:
         redis = await self.connect()
         return await redis.get(key)
 
-    async def set(self, key: str, value: str, ex: int | None = None) -> None:
+    async def set(self, key: str, value: Any, ex: int | None = None) -> None:
         redis = await self.connect()
-        await redis.set(key, value, ex=ex)
+        await redis.set(key, str(value), ex=ex)
+
+    async def set_json(self, key: str, value: Dict[str, Any], ex: int | None = None) -> None:
+        await self.set(key, json.dumps(value, ensure_ascii=False), ex=ex)
+
+    async def get_json(self, key: str) -> Dict[str, Any]:
+        raw = await self.get(key)
+        if not raw:
+            return {}
+        try:
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else {}
+        except json.JSONDecodeError:
+            return {}
 
     async def delete(self, *keys: str) -> None:
         redis = await self.connect()
         if keys:
             await redis.delete(*keys)
 
-    async def hset(self, key: str, mapping: Dict[str, Any]) -> None:
+    async def hset(self, key: str, mapping: Dict[str, Any], ex: int | None = None) -> None:
         redis = await self.connect()
         clean = {k: "" if v is None else str(v) for k, v in mapping.items()}
-        await redis.hset(key, mapping=clean)
+        pipe = redis.pipeline()
+        pipe.hset(key, mapping=clean)
+        if ex:
+            pipe.expire(key, ex)
+        await pipe.execute()
 
     async def hgetall(self, key: str) -> Dict[str, str]:
         redis = await self.connect()
@@ -55,7 +83,7 @@ class RedisService:
         return await redis.hget(key, field)
 
     async def set_user_state(self, telegram_user_id: int, state: str) -> None:
-        await self.set(f"user:{telegram_user_id}:state", state, ex=60 * 60 * 24)
+        await self.set(f"user:{telegram_user_id}:state", state, ex=settings.task_ttl_seconds)
 
     async def get_user_state(self, telegram_user_id: int) -> str:
         return await self.get(f"user:{telegram_user_id}:state") or "idle"
@@ -67,7 +95,7 @@ class RedisService:
         return await self.get(f"user:{telegram_user_id}:voice")
 
     async def set_user_task(self, telegram_user_id: int, task_id: str) -> None:
-        await self.set(f"user:{telegram_user_id}:task", task_id, ex=60 * 60 * 24)
+        await self.set(f"user:{telegram_user_id}:task", task_id, ex=settings.task_ttl_seconds)
 
     async def get_user_task(self, telegram_user_id: int) -> Optional[str]:
         return await self.get(f"user:{telegram_user_id}:task")
@@ -79,7 +107,7 @@ class RedisService:
         )
 
     async def set_task_meta(self, task_id: str, mapping: Dict[str, Any]) -> None:
-        await self.hset(f"task:{task_id}:meta", mapping)
+        await self.hset(f"task:{task_id}:meta", mapping, ex=settings.task_ttl_seconds)
 
     async def get_task_meta(self, task_id: str) -> Dict[str, str]:
         return await self.hgetall(f"task:{task_id}:meta")
@@ -87,23 +115,49 @@ class RedisService:
     async def set_task_status(self, task_id: str, status: str, progress: int | None = None) -> None:
         mapping: Dict[str, Any] = {"status": status}
         if progress is not None:
-            mapping["progress"] = progress
-        await self.hset(f"task:{task_id}:status", mapping)
+            mapping["progress"] = max(0, min(100, int(progress)))
+        await self.hset(f"task:{task_id}:status", mapping, ex=settings.task_ttl_seconds)
 
     async def get_task_status(self, task_id: str) -> Dict[str, str]:
         return await self.hgetall(f"task:{task_id}:status")
+
+    async def acquire_task_lock(self, task_id: str, owner: str) -> bool:
+        redis = await self.connect()
+        return bool(await redis.set(f"task:{task_id}:lock", owner, nx=True, ex=settings.task_lock_ttl_seconds))
+
+    async def refresh_task_lock(self, task_id: str) -> None:
+        redis = await self.connect()
+        await redis.expire(f"task:{task_id}:lock", settings.task_lock_ttl_seconds)
+
+    async def release_task_lock(self, task_id: str, owner: str) -> None:
+        redis = await self.connect()
+        key = f"task:{task_id}:lock"
+        current = await redis.get(key)
+        if current == owner:
+            await redis.delete(key)
 
     async def enqueue(self, payload: Dict[str, Any]) -> None:
         redis = await self.connect()
         await redis.rpush(settings.redis_queue_key, json.dumps(payload, ensure_ascii=False))
 
-    async def dequeue(self, timeout: int = 5) -> Optional[Dict[str, Any]]:
+    async def dequeue(self, timeout: int | None = None) -> Optional[Dict[str, Any]]:
         redis = await self.connect()
-        item = await redis.blpop(settings.redis_queue_key, timeout=timeout)
+        item = await redis.blpop(settings.redis_queue_key, timeout=timeout or settings.worker_queue_timeout_seconds)
         if not item:
             return None
         _, raw = item
-        return json.loads(raw)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    async def requeue_later(self, payload: Dict[str, Any], delay_seconds: int = 3) -> None:
+        # Simple safe requeue for transient lock conflicts. The worker sleeps before pushing back.
+        import asyncio
+
+        await asyncio.sleep(max(0, delay_seconds))
+        await self.enqueue(payload)
 
     async def queue_count(self) -> int:
         redis = await self.connect()

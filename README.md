@@ -1,8 +1,23 @@
 # AI Dubbing Bot – បញ្ចូលសម្លេងរឿង AI Dubbing
 
-Production-ready Telegram bot project for Khmer AI video dubbing. Users upload a short video and an `.srt` subtitle file. The bot generates Khmer voice using Microsoft Edge TTS, aligns audio to subtitle timing, merges it with the video using ffmpeg, and sends the final dubbed video back in Telegram.
+Production-ready Telegram bot project for Khmer AI video dubbing. Users upload a short video and an `.srt` subtitle file. The bot generates Khmer voice using Microsoft Edge TTS / `edge-tts`, aligns audio to subtitle timing, merges it with the video using ffmpeg, and sends the final dubbed video back in Telegram.
 
 This version supports **single-service deployment**. When `IN_PROCESS_WORKER=true`, the Telegram bot also runs the Redis queue processor inside the same process, so you do **not** need a separate Render worker service.
+
+## Latest improvements
+
+- Single Render service mode hardened with in-process Redis worker
+- Task lock in Redis to prevent duplicate processing
+- Safer progress throttling to reduce Telegram edit rate issues
+- Better SRT validation and Khmer error messages
+- Better video compatibility: copies MP4-safe video codecs and transcodes WebM/other codecs to H.264 MP4
+- Correct volume handling: normalization no longer double-applies dubbed volume
+- Optional TTS cache for repeated subtitle text
+- Better `edge-tts` 403 handling with optional Azure Speech fallback
+- `/status` and `/cancel` commands
+- Supabase schema migration now includes `updated_at` for task updates
+- Better ffmpeg subprocess errors in logs
+- Startup cleanup option for old temp files
 
 ## Features
 
@@ -13,9 +28,9 @@ This version supports **single-service deployment**. When `IN_PROCESS_WORKER=tru
 - Accepts Telegram video and video document uploads
 - Allowed formats: `.mp4`, `.mov`, `.mkv`, `.webm`
 - Video duration limit: 60 seconds by default
-- Configurable max video size
-- SRT validation and subtitle timing check
-- Redis state, progress, and task queue
+- Configurable max video and SRT size
+- SRT format validation and subtitle timing check
+- Redis state, progress, task lock, and task queue
 - In-process queue worker for one-service deployment
 - Optional standalone worker command for high traffic
 - Supabase tables for users, tasks, broadcasts, and logs
@@ -70,6 +85,7 @@ ffprobe -version
 sudo apt update
 sudo apt install -y ffmpeg
 ffmpeg -version
+ffprobe -version
 ```
 
 ### macOS
@@ -87,9 +103,9 @@ brew install ffmpeg
 5. Go to Project Settings → API.
 6. Copy:
    - Project URL into `SUPABASE_URL`
-   - Service Role key into `SUPABASE_SERVICE_KEY`
+   - Secret key / service role key into `SUPABASE_SERVICE_KEY`
 
-Use the service role key only on your server. Do not expose it in frontend apps.
+Use a backend-only secret/service-role key. Do not use a `sb_publishable_...` key for this bot.
 
 ## Create Redis database
 
@@ -117,13 +133,13 @@ Create a Render Key Value database and copy the internal Redis-compatible URL in
 cp .env.example .env
 ```
 
-Fill values:
+Minimum required values:
 
 ```env
 BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
 ADMIN_IDS=123456789,987654321
 SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_SERVICE_KEY=your-service-role-key
+SUPABASE_SERVICE_KEY=your-secret-or-service-role-key
 REDIS_URL=redis://localhost:6379/0
 MAX_VIDEO_DURATION_SECONDS=60
 MAX_VIDEO_SIZE_MB=50
@@ -136,6 +152,32 @@ IN_PROCESS_WORKER=true
 IN_PROCESS_WORKER_COUNT=1
 ```
 
+## TTS provider settings
+
+Default free mode:
+
+```env
+TTS_PROVIDER=edge
+IN_PROCESS_WORKER_COUNT=1
+EDGE_TTS_DELAY_SECONDS=6
+```
+
+If Render returns Edge TTS 403 errors, use official Azure Speech fallback:
+
+```env
+TTS_PROVIDER=auto
+AZURE_SPEECH_KEY=your_azure_speech_key
+AZURE_SPEECH_REGION=eastus
+```
+
+Or force Azure only:
+
+```env
+TTS_PROVIDER=azure
+AZURE_SPEECH_KEY=your_azure_speech_key
+AZURE_SPEECH_REGION=eastus
+```
+
 ## Run bot only, with in-process queue worker
 
 ```bash
@@ -146,7 +188,7 @@ This single command receives Telegram updates and processes dubbing tasks. You d
 
 ## Optional: run standalone worker for high traffic
 
-For bigger traffic, you can disable in-process processing on the bot and run a separate worker:
+For bigger traffic, disable in-process processing on the bot and run a separate worker:
 
 ```env
 IN_PROCESS_WORKER=false
@@ -174,6 +216,15 @@ python run_worker.py
 6. Bot queues a task.
 7. In-process worker processes dubbing.
 8. Bot sends completed video.
+
+Useful commands:
+
+```text
+/start
+/status
+/cancel
+/admin
+```
 
 ## Admin dashboard
 
@@ -259,83 +310,87 @@ IN_PROCESS_WORKER=true
 ENABLE_HEALTH_SERVER=true
 ```
 
-The bot will still use Telegram polling, and the tiny health server only responds to `/`, `/health`, and `/healthz` for Render health checks.
+## Render Dockerfile
 
-## Render deployment steps
+The included `Dockerfile` installs ffmpeg and starts the bot:
 
-1. Push this project to GitHub.
-2. Create Supabase project and run `database/supabase_schema.sql`.
-3. Create Render Key Value database and copy its internal Redis URL.
-4. Create one Render service using Docker.
-5. Add all env variables.
-6. Deploy.
-7. Check logs for:
-
-```text
-ffmpeg found
-Redis=True
-Supabase=True
-Started 1 in-process dubbing worker(s)
-Starting AI Dubbing Bot with polling
+```dockerfile
+CMD ["python", "-m", "app.main"]
 ```
-
-## Audio behavior
-
-- TTS is generated per subtitle block.
-- Silence is inserted between subtitle segments.
-- If TTS is shorter than the subtitle window, silence is padded.
-- If TTS is longer, it is carefully sped up with ffmpeg `atempo` and trimmed to the subtitle duration.
-- Final dubbed audio is normalized.
-- Final video duration is kept aligned with original video.
 
 ## Common errors and fixes
 
-### `Missing required binary: ffmpeg, ffprobe`
-
-Use Docker deployment. This project includes a Dockerfile that installs ffmpeg.
-
 ### `Supabase connection failed`
+
+Fix:
+
+1. Run `database/supabase_schema.sql` in Supabase SQL Editor.
+2. Use the backend secret/service-role key in `SUPABASE_SERVICE_KEY`.
+3. Do not use `sb_publishable_...` as `SUPABASE_SERVICE_KEY`.
+4. Redeploy Render after env changes.
+
+### `edge-tts 403 Invalid response status`
+
+Fix options:
+
+1. Keep `IN_PROCESS_WORKER_COUNT=1`.
+2. Set `EDGE_TTS_DELAY_SECONDS=6` or higher.
+3. Use `TTS_PROVIDER=auto` with Azure Speech keys.
+4. Use `TTS_PROVIDER=azure` for production reliability.
+
+### `ffmpeg not found`
+
+Use Docker deployment on Render, or install ffmpeg locally and make sure `ffmpeg` and `ffprobe` are in PATH.
+
+### Bot works but task never processes
 
 Check:
 
-- Did you run `database/supabase_schema.sql`?
-- Is `SUPABASE_URL` correct?
-- Are you using `SUPABASE_SERVICE_KEY`, not anon key?
-
-### `Redis connection failed`
-
-Check Redis URL and make sure Redis is running.
-
-Local Docker test:
-
-```bash
-docker ps
-```
-
-### Bot receives video but task never processes
-
-Make sure this env var is set:
-
 ```env
 IN_PROCESS_WORKER=true
+REDIS_URL=same value used by bot
 ```
 
-Also check Redis is connected and the Render logs show:
+Then check Render logs for:
 
 ```text
 Started 1 in-process dubbing worker(s)
 ```
 
-### Render Web Service deploy fails because no open port
+### Final video fails for `.webm`
 
-Set:
+This version automatically transcodes non-MP4-safe video codecs to H.264. Make sure the Docker deployment includes ffmpeg.
+
+### Telegram upload too large
+
+Increase:
 
 ```env
-ENABLE_HEALTH_SERVER=true
+MAX_VIDEO_SIZE_MB=50
 ```
 
-For a Background Worker service, keep it false.
+Remember Telegram bot download limits and Render memory/disk limits still apply.
 
-### Free Render service sleeps
+## Project structure
 
-If using a free Web Service, it can spin down when idle. For a Telegram bot that must respond reliably, use a paid instance or a Render Background Worker.
+```text
+ai-dubbing-bot/
+├── app/
+│   ├── main.py
+│   ├── bot.py
+│   ├── config.py
+│   ├── states.py
+│   ├── handlers/
+│   ├── services/
+│   ├── workers/
+│   └── utils/
+├── database/supabase_schema.sql
+├── temp/
+├── logs/
+├── requirements.txt
+├── .env.example
+├── Dockerfile
+├── Procfile
+├── README.md
+└── run_worker.py
+```

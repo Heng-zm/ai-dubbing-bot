@@ -1,5 +1,5 @@
 python-telegram-bot[job-queue]==21.9
-edge-tts==7.0.2
+edge-tts==7.2.8
 ffmpeg-python==0.2.0
 supabase==2.10.0
 redis==5.2.1

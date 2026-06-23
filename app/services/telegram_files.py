@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 from telegram import Message
 
@@ -26,8 +26,7 @@ def get_video_file_info(message: Message) -> Tuple[str, int | None, str, int | N
         doc = message.document
         filename = doc.file_name or f"telegram_document_{doc.file_unique_id}"
         suffix = Path(filename).suffix.lower()
-        mime = doc.mime_type or ""
-        if suffix not in ALLOWED_VIDEO_SUFFIXES and not mime.startswith("video/"):
+        if suffix not in ALLOWED_VIDEO_SUFFIXES:
             raise ValueError("unsupported_video_format")
         return doc.file_id, doc.file_size, filename, None
 
@@ -41,6 +40,8 @@ def get_srt_file_info(message: Message) -> Tuple[str, int | None, str]:
     filename = doc.file_name or "subtitle.srt"
     if Path(filename).suffix.lower() != ".srt":
         raise ValueError("not_srt")
+    if doc.file_size and doc.file_size > settings.max_srt_size_bytes:
+        raise ValueError("srt_too_large")
     return doc.file_id, doc.file_size, filename
 
 
@@ -67,7 +68,11 @@ async def download_and_validate_video(message: Message, bot) -> dict:
     path = settings.videos_dir / local_name
     await download_telegram_file(bot, file_id, path)
 
-    if path.stat().st_size > settings.max_video_size_bytes:
+    actual_size = path.stat().st_size if path.exists() else 0
+    if actual_size <= 0:
+        path.unlink(missing_ok=True)
+        raise ValueError("no_video")
+    if actual_size > settings.max_video_size_bytes:
         path.unlink(missing_ok=True)
         raise ValueError("video_too_large")
 
@@ -78,7 +83,7 @@ async def download_and_validate_video(message: Message, bot) -> dict:
 
     return {
         "file_id": file_id,
-        "file_size": path.stat().st_size,
+        "file_size": actual_size,
         "filename": filename,
         "path": str(path),
         "duration": duration,
@@ -89,4 +94,7 @@ async def download_srt(message: Message, bot, task_id: str) -> dict:
     file_id, file_size, filename = get_srt_file_info(message)
     path = settings.subtitles_dir / f"{task_id}.srt"
     await download_telegram_file(bot, file_id, path)
-    return {"file_id": file_id, "file_size": file_size, "filename": filename, "path": str(path)}
+    if path.stat().st_size > settings.max_srt_size_bytes:
+        path.unlink(missing_ok=True)
+        raise ValueError("srt_too_large")
+    return {"file_id": file_id, "file_size": path.stat().st_size, "filename": filename, "path": str(path)}

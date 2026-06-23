@@ -14,7 +14,7 @@ from app.utils.file_utils import run_subprocess
 
 
 def _atempo_chain(speed: float) -> str:
-    """Build ffmpeg atempo chain. Each atempo filter should be between 0.5 and 2.0."""
+    """Build ffmpeg atempo chain. Each atempo filter must be between 0.5 and 2.0."""
     speed = max(speed, 0.25)
     parts: List[float] = []
     remaining = speed
@@ -34,6 +34,8 @@ async def create_silence(path: Path, duration: float) -> Path:
     cmd = [
         settings.ffmpeg_binary,
         "-y",
+        "-hide_banner",
+        "-nostdin",
         "-f",
         "lavfi",
         "-i",
@@ -52,21 +54,22 @@ async def fit_audio_to_duration(input_path: Path, output_path: Path, target_dura
     """Pad, gently speed up, or trim TTS audio to exactly fit a subtitle window."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     source_duration = await get_media_duration(input_path)
-    target_duration = max(0.05, target_duration)
+    target_duration = max(settings.min_subtitle_duration_seconds, target_duration)
 
-    # If audio is meaningfully longer, speed it up to fit. If extremely long, speed plus trim.
     filters: List[str] = []
     if source_duration > target_duration * 1.03:
+        # Speed up instead of blunt trimming when possible. This preserves intelligibility better.
         speed = source_duration / target_duration
         filters.append(_atempo_chain(speed))
 
-    # apad pads short audio; atrim enforces exact subtitle duration.
     filters.extend(["apad", f"atrim=0:{target_duration:.3f}", "asetpts=N/SR/TB"])
     filter_str = ",".join(filters)
 
     cmd = [
         settings.ffmpeg_binary,
         "-y",
+        "-hide_banner",
+        "-nostdin",
         "-i",
         str(input_path),
         "-af",
@@ -90,13 +93,14 @@ async def concat_wav_files(files: Iterable[Path], output_path: Path) -> Path:
     list_file = output_path.with_suffix(".concat.txt")
     lines = []
     for file in files:
-        # ffmpeg concat file format expects single quotes escaped.
         safe_path = str(file.resolve()).replace("'", "'\\''")
         lines.append(f"file '{safe_path}'")
     list_file.write_text("\n".join(lines), encoding="utf-8")
     cmd = [
         settings.ffmpeg_binary,
         "-y",
+        "-hide_banner",
+        "-nostdin",
         "-f",
         "concat",
         "-safe",
@@ -108,28 +112,44 @@ async def concat_wav_files(files: Iterable[Path], output_path: Path) -> Path:
         str(output_path),
     ]
     await run_subprocess(cmd, timeout=300)
-    try:
-        list_file.unlink(missing_ok=True)
-    except Exception:
-        pass
+    list_file.unlink(missing_ok=True)
     return output_path
 
 
 async def normalize_audio(input_path: Path, output_path: Path) -> Path:
+    """Normalize loudness without applying final user-configurable dubbed volume."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        settings.ffmpeg_binary,
-        "-y",
-        "-i",
-        str(input_path),
-        "-af",
-        f"volume={settings.dubbed_audio_volume},loudnorm=I=-16:TP=-1.5:LRA=11",
-        "-ac",
-        "2",
-        "-ar",
-        "44100",
-        str(output_path),
-    ]
+    if not settings.normalize_audio:
+        # Re-encode to consistent WAV to keep downstream ffmpeg behavior stable.
+        cmd = [
+            settings.ffmpeg_binary,
+            "-y",
+            "-hide_banner",
+            "-nostdin",
+            "-i",
+            str(input_path),
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            str(output_path),
+        ]
+    else:
+        cmd = [
+            settings.ffmpeg_binary,
+            "-y",
+            "-hide_banner",
+            "-nostdin",
+            "-i",
+            str(input_path),
+            "-af",
+            "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ac",
+            "2",
+            "-ar",
+            "44100",
+            str(output_path),
+        ]
     await run_subprocess(cmd, timeout=300)
     return output_path
 
@@ -162,8 +182,7 @@ async def build_dubbed_audio(
         cursor = max(cursor, item.end)
 
         if progress_callback:
-            # Map subtitle generation from roughly 15% to 70%.
-            percent = 15 + math.floor((idx / total) * 55)
+            percent = 20 + math.floor((idx / total) * 55)
             await progress_callback(percent, f"កំពុងបង្កើតសម្លេង AI... {percent}%")
 
     if video_duration > cursor + 0.02:

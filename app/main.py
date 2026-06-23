@@ -14,6 +14,7 @@ def main() -> None:
     application.run_polling(
         allowed_updates=["message", "callback_query", "my_chat_member", "chat_member"],
         close_loop=False,
+        drop_pending_updates=settings.drop_pending_updates,
     )
 
 

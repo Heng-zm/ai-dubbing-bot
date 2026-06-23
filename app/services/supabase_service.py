@@ -1,7 +1,7 @@
 """Supabase database service.
 
-Supabase Python client is synchronous, so this service wraps calls in asyncio.to_thread
-when used from async Telegram handlers.
+The Supabase Python client is synchronous, so this service wraps calls in
+asyncio.to_thread when used from async Telegram handlers.
 """
 
 from __future__ import annotations
@@ -11,6 +11,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.config import settings
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class SupabaseService:
@@ -27,18 +31,23 @@ class SupabaseService:
         return self.client
 
     async def health_check(self) -> bool:
+        """Return True when credentials and required tables are usable."""
+        from app.services.logger_service import logger
+
         def _check() -> bool:
             client = self.connect_sync()
-            client.table("users").select("id", count="exact").limit(1).execute()
+            for table in ("users", "dubbing_tasks", "broadcasts", "logs"):
+                client.table(table).select("id", count="exact").limit(1).execute()
             return True
 
         try:
             return await asyncio.to_thread(_check)
-        except Exception:
+        except Exception as exc:
+            logger.exception("Supabase health check failed: %s", exc)
             return False
 
     async def upsert_user(self, user, selected_voice: str | None = None) -> Optional[Dict[str, Any]]:
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = _now_iso()
         payload = {
             "telegram_user_id": user.id,
             "username": user.username,
@@ -53,21 +62,11 @@ class SupabaseService:
 
         def _run():
             client = self.connect_sync()
-            result = (
-                client.table("users")
-                .upsert(payload, on_conflict="telegram_user_id")
-                .execute()
-            )
+            result = client.table("users").upsert(payload, on_conflict="telegram_user_id").execute()
             rows = result.data or []
             if rows:
                 return rows[0]
-            fallback = (
-                client.table("users")
-                .select("*")
-                .eq("telegram_user_id", user.id)
-                .limit(1)
-                .execute()
-            )
+            fallback = client.table("users").select("*").eq("telegram_user_id", user.id).limit(1).execute()
             return (fallback.data or [None])[0]
 
         return await asyncio.to_thread(_run)
@@ -75,8 +74,7 @@ class SupabaseService:
     async def update_user_voice(self, telegram_user_id: int, voice: str) -> None:
         def _run() -> None:
             client = self.connect_sync()
-            now_iso = datetime.now(timezone.utc).isoformat()
-            client.table("users").update({"selected_voice": voice, "updated_at": now_iso}).eq(
+            client.table("users").update({"selected_voice": voice, "updated_at": _now_iso()}).eq(
                 "telegram_user_id", telegram_user_id
             ).execute()
 
@@ -93,7 +91,9 @@ class SupabaseService:
     async def update_task(self, task_id: str, payload: Dict[str, Any]) -> None:
         def _run() -> None:
             client = self.connect_sync()
-            client.table("dubbing_tasks").update(payload).eq("id", task_id).execute()
+            clean_payload = dict(payload)
+            clean_payload["updated_at"] = _now_iso()
+            client.table("dubbing_tasks").update(clean_payload).eq("id", task_id).execute()
 
         await asyncio.to_thread(_run)
 
@@ -108,13 +108,7 @@ class SupabaseService:
     async def list_users(self, limit: int = 20) -> List[Dict[str, Any]]:
         def _run():
             client = self.connect_sync()
-            result = (
-                client.table("users")
-                .select("*")
-                .order("last_active_at", desc=True)
-                .limit(limit)
-                .execute()
-            )
+            result = client.table("users").select("*").order("last_active_at", desc=True).limit(limit).execute()
             return result.data or []
 
         return await asyncio.to_thread(_run)
@@ -126,28 +120,33 @@ class SupabaseService:
             start = 0
             page_size = 1000
             while True:
-                result = (
-                    client.table("users")
-                    .select("telegram_user_id")
-                    .range(start, start + page_size - 1)
-                    .execute()
-                )
+                result = client.table("users").select("telegram_user_id").range(start, start + page_size - 1).execute()
                 batch = result.data or []
                 rows.extend(batch)
                 if len(batch) < page_size:
                     break
                 start += page_size
-            return [int(row["telegram_user_id"]) for row in rows if row.get("telegram_user_id")]
+            seen: set[int] = set()
+            output: List[int] = []
+            for row in rows:
+                value = row.get("telegram_user_id")
+                if value is None:
+                    continue
+                user_id = int(value)
+                if user_id not in seen:
+                    seen.add(user_id)
+                    output.append(user_id)
+            return output
 
         return await asyncio.to_thread(_run)
 
     async def list_tasks(self, status: str | None = None, limit: int = 20) -> List[Dict[str, Any]]:
         def _run():
             client = self.connect_sync()
-            query = client.table("dubbing_tasks").select("*").order("created_at", desc=True).limit(limit)
+            query = client.table("dubbing_tasks").select("*")
             if status:
                 query = query.eq("status", status)
-            result = query.execute()
+            result = query.order("created_at", desc=True).limit(limit).execute()
             return result.data or []
 
         return await asyncio.to_thread(_run)
@@ -208,7 +207,7 @@ class SupabaseService:
             )
             today_tasks = int(today_result.count or 0)
 
-            voices = client.table("dubbing_tasks").select("voice").execute().data or []
+            voices = client.table("dubbing_tasks").select("voice").limit(5000).execute().data or []
             voice_counts: Dict[str, int] = {}
             for row in voices:
                 voice = row.get("voice")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Iterable
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
@@ -51,6 +51,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     user = update.effective_user
+    if not query:
+        return
     if not is_admin(user.id if user else None):
         await query.answer("No permission", show_alert=True)
         return
@@ -77,7 +79,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     elif action == "settings":
         await _show_settings(query)
     elif action == "clean":
-        deleted = clean_temp_older_than(hours=12)
+        deleted = clean_temp_older_than(hours=settings.cleanup_old_temp_hours)
         await query.edit_message_text(f"បានសម្អាត temp files ចំនួន {deleted} files។", reply_markup=back_keyboard())
     elif action == "logs":
         await _show_logs(query)
@@ -89,11 +91,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("Broadcast បានបោះបង់។", reply_markup=back_keyboard())
 
 
+async def _safe_edit(query, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    await query.edit_message_text(truncate(text, 3900), reply_markup=reply_markup)
+
+
 async def _show_stats(query) -> None:
     redis_ok = await redis_service.ping()
     supabase_ok = await supabase_service.health_check()
-    queue_count = await redis_service.queue_count()
-    stats = await supabase_service.stats()
+    queue_count = await redis_service.queue_count() if redis_ok else 0
+    stats = await supabase_service.stats() if supabase_ok else {}
     text = (
         "📊 Bot Stats\n\n"
         f"👥 Total users: {stats.get('total_users', 0)}\n"
@@ -108,25 +114,25 @@ async def _show_stats(query) -> None:
         f"🧠 Redis: {'OK' if redis_ok else 'FAILED'}\n"
         f"🗄️ Supabase: {'OK' if supabase_ok else 'FAILED'}"
     )
-    await query.edit_message_text(text, reply_markup=back_keyboard())
+    await _safe_edit(query, text, back_keyboard())
 
 
 async def _show_users(query) -> None:
-    users = await supabase_service.list_users(limit=10)
+    users = await supabase_service.list_users(limit=15)
     if not users:
         text = "មិនទាន់មានអ្នកប្រើទេ។"
     else:
-        lines = ["👥 Recent Users\n"]
+        lines = ["👥 Recent Users", ""]
         for row in users:
             name = " ".join(filter(None, [row.get("first_name"), row.get("last_name")])) or "Unknown"
             username = f"@{row.get('username')}" if row.get("username") else ""
             lines.append(f"• {name} {username} — {row.get('telegram_user_id')}")
         text = "\n".join(lines)
-    await query.edit_message_text(text, reply_markup=back_keyboard())
+    await _safe_edit(query, text, back_keyboard())
 
 
 async def _show_tasks(query, status: str | None) -> None:
-    tasks = await supabase_service.list_tasks(status=status, limit=10)
+    tasks = await supabase_service.list_tasks(status=status, limit=15)
     title = "🎬 Recent Tasks" if not status else f"🎬 Tasks: {status}"
     if not tasks:
         text = f"{title}\n\nមិនមានទិន្នន័យទេ។"
@@ -137,7 +143,7 @@ async def _show_tasks(query, status: str | None) -> None:
                 f"• {str(row.get('id'))[:8]} | {row.get('status')} | {row.get('progress', 0)}% | user {row.get('telegram_user_id')}"
             )
         text = "\n".join(lines)
-    await query.edit_message_text(text, reply_markup=back_keyboard())
+    await _safe_edit(query, text, back_keyboard())
 
 
 async def _show_running(query) -> None:
@@ -148,7 +154,7 @@ async def _show_running(query) -> None:
         lines.append(f"• {str(row.get('id'))[:8]} | {row.get('status')} | {row.get('progress', 0)}%")
     if len(lines) == 2:
         lines.append("មិនមាន task កំពុងដំណើរការ។")
-    await query.edit_message_text("\n".join(lines), reply_markup=back_keyboard())
+    await _safe_edit(query, "\n".join(lines), back_keyboard())
 
 
 async def _show_settings(query) -> None:
@@ -156,22 +162,27 @@ async def _show_settings(query) -> None:
         "⚙️ Settings\n\n"
         f"Max video duration: {settings.max_video_duration_seconds}s\n"
         f"Max video size: {settings.max_video_size_mb}MB\n"
+        f"Max SRT size: {settings.max_srt_size_mb}MB\n"
+        f"TTS provider: {settings.tts_provider}\n"
+        f"TTS cache: {settings.tts_cache_enabled}\n"
         f"Keep original audio: {settings.keep_original_audio}\n"
         f"Original audio volume: {settings.original_audio_volume}\n"
         f"Dubbed audio volume: {settings.dubbed_audio_volume}\n"
+        f"In-process worker: {settings.in_process_worker}\n"
+        f"Worker count: {settings.in_process_worker_count}\n"
         f"Clean success files: {settings.clean_success_files}\n"
         f"Keep failed files: {settings.keep_failed_files}\n"
         f"Queue key: {settings.redis_queue_key}"
     )
-    await query.edit_message_text(text, reply_markup=back_keyboard())
+    await _safe_edit(query, text, back_keyboard())
 
 
 async def _show_logs(query) -> None:
     try:
-        logs = await supabase_service.recent_logs(limit=10)
+        logs = await supabase_service.recent_logs(limit=12)
         lines = ["📝 Recent Logs", ""]
         for row in logs:
-            lines.append(f"• {row.get('level')} | {row.get('category')} | {truncate(row.get('message') or '', 80)}")
+            lines.append(f"• {row.get('level')} | {row.get('category')} | {truncate(row.get('message') or '', 90)}")
         if len(lines) == 2:
             lines.append("មិនទាន់មាន logs។")
         text = "\n".join(lines)
@@ -181,7 +192,7 @@ async def _show_logs(query) -> None:
             text = "📝 Recent Local Logs\n\n" + "\n".join(log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-12:])
         else:
             text = "មិនមាន logs។"
-    await query.edit_message_text(truncate(text, 3500), reply_markup=back_keyboard())
+    await _safe_edit(query, text, back_keyboard())
 
 
 async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -206,18 +217,21 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             [InlineKeyboardButton("❌ Cancel", callback_data="admin:broadcast_cancel")],
         ]
     )
-    await message.reply_text(f"តើអ្នកប្រាកដថាចង់ផ្ញើ Broadcast នេះទេ?\n\n{text}", reply_markup=keyboard)
+    await message.reply_text(f"តើអ្នកប្រាកដថាចង់ផ្ញើ Broadcast នេះទេ?\n\n{truncate(text, 3000)}", reply_markup=keyboard)
     return True
 
 
 async def _confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     admin = update.effective_user
+    if not query or not admin:
+        return
     text = await redis_service.get(f"admin:{admin.id}:broadcast_text")
     if not text:
         await query.edit_message_text("រកមិនឃើញអត្ថបទ Broadcast។", reply_markup=back_keyboard())
         return
     await redis_service.set_user_state(admin.id, "idle")
+    await redis_service.delete(f"admin:{admin.id}:broadcast_text")
     await query.edit_message_text("កំពុងផ្ញើ Broadcast...", reply_markup=back_keyboard())
     asyncio.create_task(_broadcast_to_all(context, admin.id, text, query.message.chat_id))
 
@@ -230,24 +244,24 @@ async def _broadcast_to_all(context: ContextTypes.DEFAULT_TYPE, admin_id: int, t
         try:
             await context.bot.send_message(chat_id=telegram_user_id, text=text)
             sent += 1
-            await asyncio.sleep(0.04)
         except TelegramError:
             failed += 1
-        except Exception:
-            failed += 1
-    try:
-        await supabase_service.create_broadcast_log(
-            {
-                "admin_telegram_id": admin_id,
-                "message": text,
-                "total_users": len(users),
-                "sent_count": sent,
-                "failed_count": failed,
-            }
-        )
-    except Exception:
-        pass
-    await context.bot.send_message(
-        chat_id=report_chat_id,
-        text=f"Broadcast រួចរាល់ ✅\nTotal: {len(users)}\nSent: {sent}\nFailed: {failed}",
+        if settings.telegram_broadcast_delay_seconds > 0:
+            await asyncio.sleep(settings.telegram_broadcast_delay_seconds)
+
+    await supabase_service.create_broadcast_log(
+        {
+            "admin_telegram_id": admin_id,
+            "message": text,
+            "total_users": len(users),
+            "sent_count": sent,
+            "failed_count": failed,
+        }
     )
+    try:
+        await context.bot.send_message(
+            chat_id=report_chat_id,
+            text=f"Broadcast រួចរាល់ ✅\nTotal: {len(users)}\nSent: {sent}\nFailed: {failed}",
+        )
+    except TelegramError:
+        pass
