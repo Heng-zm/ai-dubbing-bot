@@ -276,16 +276,24 @@ async def process_task(bot: Bot, payload: Dict[str, Any], worker_name: str = "du
             raise RuntimeError("ffmpeg output file was not created or is empty")
         await progress.edit(92, f"📤 កំពុងផ្ញើវីដេអូទៅ Telegram...\n\n{percent_line(92)}", force=True)
 
-        await _await_with_heartbeat(
-            _send_video_with_retry(bot, chat_id, output_path),
-            progress=progress,
-            task_id=task_id,
-            steps=[
-                (95, f"📤 កំពុង Upload លទ្ធផលទៅ Telegram...\n\n{percent_line(95)}"),
-                (98, f"📤 ជិតរួចរាល់ហើយ...\n\n{percent_line(98)}"),
-            ],
-            tick_seconds=15.0,
-        )
+        # If a duplicate worker/job reaches this point after a crash/retry, do
+        # not send the final video twice. The first successful send stores this
+        # lightweight Redis marker before marking the DB task completed.
+        meta_before_send = await redis_service.get_task_meta(task_id)
+        if meta_before_send.get("final_sent") != "1":
+            await _await_with_heartbeat(
+                _send_video_with_retry(bot, chat_id, output_path),
+                progress=progress,
+                task_id=task_id,
+                steps=[
+                    (95, f"📤 កំពុង Upload លទ្ធផលទៅ Telegram...\n\n{percent_line(95)}"),
+                    (98, f"📤 ជិតរួចរាល់ហើយ...\n\n{percent_line(98)}"),
+                ],
+                tick_seconds=15.0,
+            )
+            await redis_service.set_task_meta(task_id, {"final_sent": "1", "output_path": str(output_path)})
+        else:
+            logger.info("Skipping duplicate final send for already delivered task %s", task_id)
         await update_task_status(task_id, TASK_COMPLETED, 100, output_file_path=str(output_path), mark_finished=True)
         await progress.edit(100, f"✅ រួចរាល់!\n\n{percent_line(100)}", force=True)
         await redis_service.set_user_state(telegram_user_id, STATE_IDLE)

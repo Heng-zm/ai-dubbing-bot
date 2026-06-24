@@ -72,28 +72,63 @@ def check_ffmpeg_available() -> None:
         )
 
 
-async def run_subprocess(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    """Run a subprocess off the event loop and preserve useful ffmpeg errors."""
+def _short_command(cmd: list[str], max_items: int = 10) -> str:
+    return " ".join(str(item) for item in cmd[:max_items]) + (" ..." if len(cmd) > max_items else "")
 
-    def _run() -> subprocess.CompletedProcess[str]:
+
+async def _terminate_process(process: asyncio.subprocess.Process) -> None:
+    """Stop a subprocess without leaving ffmpeg/ffprobe running after cancellation."""
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except Exception:
         try:
-            return subprocess.run(
-                cmd,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout,
-            )
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()[-3000:]
-            stdout = (exc.stdout or "").strip()[-1000:]
-            command = " ".join(cmd[:8]) + (" ..." if len(cmd) > 8 else "")
-            raise RuntimeError(
-                f"Command failed ({exc.returncode}): {command}\nSTDERR: {stderr}\nSTDOUT: {stdout}"
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            command = " ".join(cmd[:8]) + (" ..." if len(cmd) > 8 else "")
-            raise RuntimeError(f"Command timed out after {timeout}s: {command}") from exc
+            process.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except Exception:
+            pass
 
-    return await asyncio.to_thread(_run)
+
+async def run_subprocess(cmd: list[str], timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+    """Run ffmpeg/ffprobe safely without blocking the event loop.
+
+    The older implementation used ``subprocess.run`` inside ``asyncio.to_thread``.
+    When Render restarted or a task was cancelled, the Python coroutine could stop
+    while ffmpeg kept running in the background until its timeout. This async
+    implementation terminates the child process on timeout/cancellation and keeps
+    useful stderr/stdout snippets for admin logs.
+    """
+    command = _short_command(cmd)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *[str(item) for item in cmd],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Command binary not found: {cmd[0]}") from exc
+
+    try:
+        stdout_b, stderr_b = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        await _terminate_process(process)
+        raise RuntimeError(f"Command timed out after {timeout}s: {command}") from exc
+    except asyncio.CancelledError:
+        await _terminate_process(process)
+        raise
+
+    stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+    stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+    completed = subprocess.CompletedProcess(cmd, process.returncode or 0, stdout, stderr)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Command failed ({completed.returncode}): {command}\n"
+            f"STDERR: {(stderr or '').strip()[-3000:]}\n"
+            f"STDOUT: {(stdout or '').strip()[-1000:]}"
+        )
+    return completed

@@ -835,3 +835,14 @@ Recommended admin setting:
 ```
 
 If Render restarts during processing, the bot now marks interrupted tasks as failed and shows a Retry button instead of leaving the user stuck at 91%.
+
+## Latest maintenance notes
+
+This version includes additional bug fixes and performance improvements for Render single-service deployments:
+
+- Async ffmpeg/ffprobe execution, so cancelled tasks and Render shutdown do not leave subprocesses running in the background.
+- Faster Redis queue deduplication with a pending task-ID set.
+- Better restart recovery when the final video was already sent but the server restarted before marking the task completed.
+- MP4 output is written with `+faststart` to improve Telegram playback compatibility.
+
+No new Supabase migration is required for this maintenance update.

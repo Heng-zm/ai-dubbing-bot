@@ -162,25 +162,39 @@ class RedisService:
         except Exception:
             return settings.redis_queue_key
 
+    @staticmethod
+    def _queue_task_set_key(queue_key: str) -> str:
+        return f"{queue_key}:task_ids"
+
     async def enqueue(self, payload: Dict[str, Any]) -> int:
         """Push a job into the queue and return its 1-based position after enqueue.
 
-        Duplicate Telegram callback taps can happen. Before pushing, scan the
-        pending list for the same task_id and return the existing queue position
-        instead of enqueuing a duplicate job.
+        A small Redis set tracks task IDs currently in the pending queue. This is
+        faster than scanning the whole list every time and protects against
+        duplicate confirm/retry taps even if callback updates arrive very close
+        together. The list remains the source of truth for processing order.
         """
         redis = await self.connect()
         queue_key = await self._queue_key()
+        set_key = self._queue_task_set_key(queue_key)
         task_id = str(payload.get("task_id") or "")
-        if task_id:
+        if task_id and await redis.sismember(set_key, task_id):
             existing_position = await self.queue_position(task_id)
             if existing_position:
                 return existing_position
+            # The set was stale because the list no longer contains this task.
+            await redis.srem(set_key, task_id)
 
         enriched = dict(payload)
         enriched.setdefault("enqueued_at", datetime.now(timezone.utc).isoformat())
-        await redis.rpush(queue_key, json.dumps(enriched, ensure_ascii=False))
-        return int(await redis.llen(queue_key))
+        raw = json.dumps(enriched, ensure_ascii=False)
+        pipe = redis.pipeline()
+        pipe.rpush(queue_key, raw)
+        if task_id:
+            pipe.sadd(set_key, task_id)
+            pipe.expire(set_key, settings.task_ttl_seconds)
+        results = await pipe.execute()
+        return int(results[0])
 
     async def queue_position(self, task_id: str) -> Optional[int]:
         """Return the current 1-based pending queue position for a task.
@@ -200,6 +214,11 @@ class RedisService:
                 continue
             if isinstance(payload, dict) and str(payload.get("task_id")) == str(task_id):
                 return index
+        # Clean a stale dedupe-set entry when the task is no longer in the list.
+        try:
+            await redis.srem(self._queue_task_set_key(await self._queue_key()), str(task_id))
+        except RedisError:
+            pass
         return None
 
 
@@ -224,6 +243,7 @@ class RedisService:
                 continue
             if isinstance(payload, dict) and str(payload.get("task_id")) == str(task_id):
                 removed += int(await redis.lrem(queue_key, 0, raw))
+        await redis.srem(self._queue_task_set_key(queue_key), str(task_id))
         return removed
 
     async def is_terminal_task_status(self, task_id: str) -> bool:
@@ -267,12 +287,15 @@ class RedisService:
         queue_key = await self._queue_key()
         count = int(await redis.llen(queue_key))
         if count:
-            await redis.delete(queue_key)
+            await redis.delete(queue_key, self._queue_task_set_key(queue_key))
+        else:
+            await redis.delete(self._queue_task_set_key(queue_key))
         return count
 
     async def dequeue(self, timeout: int | None = None) -> Optional[Dict[str, Any]]:
         redis = await self.connect()
-        item = await redis.blpop(await self._queue_key(), timeout=timeout or settings.worker_queue_timeout_seconds)
+        queue_key = await self._queue_key()
+        item = await redis.blpop(queue_key, timeout=timeout or settings.worker_queue_timeout_seconds)
         if not item:
             return None
         _, raw = item
@@ -280,7 +303,12 @@ class RedisService:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             return None
-        return payload if isinstance(payload, dict) else None
+        if isinstance(payload, dict):
+            task_id = str(payload.get("task_id") or "")
+            if task_id:
+                await redis.srem(self._queue_task_set_key(queue_key), task_id)
+            return payload
+        return None
 
     async def requeue_later(self, payload: Dict[str, Any], delay_seconds: int = 3) -> None:
         # Simple safe requeue for transient lock conflicts. The worker sleeps before pushing back.

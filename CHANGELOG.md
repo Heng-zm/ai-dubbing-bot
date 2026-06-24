@@ -78,3 +78,13 @@ No database migration is required. Redeploy the updated code only.
 - ffmpeg merge now writes to a `.partial.mp4` file and atomically moves it only after success.
 - ffmpeg merge logs now show the selected plan: copy-video or encode-video.
 - Startup now recovers interrupted `processing` tasks after Render restarts and shows Retry/Start buttons instead of leaving users stuck at 91%.
+
+## Maintenance Performance Update
+
+- Replaced blocking subprocess execution with async subprocess management.
+- ffmpeg/ffprobe child processes are now terminated on timeout or cancellation.
+- Added Redis pending-task dedupe set for faster queue operations and safer duplicate button handling.
+- Cleaned stale Redis dedupe entries automatically when queue list no longer contains a task.
+- Prevented duplicate final video delivery after restart by storing a lightweight `final_sent` marker.
+- Startup recovery now marks tasks completed when the final video was already sent before a restart.
+- Added `-movflags +faststart` to MP4 output for better Telegram playback behavior.

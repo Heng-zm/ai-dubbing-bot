@@ -217,6 +217,8 @@ async def merge_audio_with_video(
                 "192k",
                 "-shortest",
                 *metadata_args,
+                "-movflags",
+                "+faststart",
                 str(tmp_output),
             ]
         elif visible_watermark:
@@ -235,6 +237,8 @@ async def merge_audio_with_video(
                 "192k",
                 "-shortest",
                 *metadata_args,
+                "-movflags",
+                "+faststart",
                 str(tmp_output),
             ]
         elif keep_original:
@@ -257,6 +261,8 @@ async def merge_audio_with_video(
                 "192k",
                 "-shortest",
                 *metadata_args,
+                "-movflags",
+                "+faststart",
                 str(tmp_output),
             ]
         else:
@@ -274,6 +280,8 @@ async def merge_audio_with_video(
                 "192k",
                 "-shortest",
                 *metadata_args,
+                "-movflags",
+                "+faststart",
                 str(tmp_output),
             ]
 

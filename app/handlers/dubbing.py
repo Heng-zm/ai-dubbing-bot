@@ -654,6 +654,7 @@ async def _retry_failed_task(query, telegram_user_id: int, task_id: str) -> None
         voice = str((task or {}).get("voice") or await redis_service.get_user_voice(telegram_user_id) or "")
         video_duration = float((task or {}).get("video_duration") or 0)
         await redis_service.remove_task_from_queue(task_id)
+        await redis_service.set_task_meta(task_id, {"final_sent": "", "output_path": ""})
         await supabase_service.update_task(
             task_id,
             {

@@ -19,7 +19,7 @@ from app.services.redis_service import redis_service
 from app.services.runtime_settings import runtime_settings
 from app.services.supabase_service import supabase_service
 from app.utils.file_utils import check_ffmpeg_available, clean_temp_older_than
-from app.states import STATE_IDLE, TASK_FAILED, TASK_PROCESSING
+from app.states import STATE_IDLE, TASK_COMPLETED, TASK_FAILED, TASK_PROCESSING
 
 
 async def _recover_interrupted_processing_tasks(application: Application) -> None:
@@ -44,6 +44,37 @@ async def _recover_interrupted_processing_tasks(application: Application) -> Non
         meta = await redis_service.get_task_meta(task_id)
         await redis_service.clear_task_lock(task_id)
         progress = int(float((row.get("status") or {}).get("progress") or 0))
+        telegram_user_id = int(meta.get("telegram_user_id") or 0)
+        chat_id = int(meta.get("chat_id") or 0)
+        message_id = int(meta.get("progress_message_id") or 0)
+
+        # If the final video was already sent but the process restarted before
+        # updating the terminal status, mark it completed instead of showing a
+        # confusing failed/retry message or sending the video twice.
+        if meta.get("final_sent") == "1":
+            await update_task_status(
+                task_id,
+                TASK_COMPLETED,
+                progress=100,
+                output_file_path=meta.get("output_path") or None,
+                mark_finished=True,
+            )
+            if telegram_user_id:
+                await redis_service.set_user_state(telegram_user_id, STATE_IDLE)
+                await redis_service.delete(f"user:{telegram_user_id}:task")
+            if chat_id and message_id:
+                try:
+                    await application.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text='✅ Task បានបញ្ចប់រួចហើយ។\n\nចុច Button "Start" ខាងក្រោមដើម្បីបន្ត។',
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Start", callback_data="start_dubbing")]]),
+                    )
+                except TelegramError as exc:
+                    logger.warning("Could not update recovered completed task %s: %s", task_id, exc)
+            recovered += 1
+            continue
+
         await update_task_status(
             task_id,
             TASK_FAILED,
@@ -51,9 +82,6 @@ async def _recover_interrupted_processing_tasks(application: Application) -> Non
             error_message="[server_restart] Render restarted while task was processing",
             mark_finished=True,
         )
-        telegram_user_id = int(meta.get("telegram_user_id") or 0)
-        chat_id = int(meta.get("chat_id") or 0)
-        message_id = int(meta.get("progress_message_id") or 0)
         video_exists = bool(meta.get("video_path") and Path(str(meta.get("video_path"))).exists())
         srt_exists = bool(meta.get("srt_path") and Path(str(meta.get("srt_path"))).exists())
         retry_allowed = video_exists and srt_exists
