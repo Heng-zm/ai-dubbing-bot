@@ -846,3 +846,32 @@ This version includes additional bug fixes and performance improvements for Rend
 - MP4 output is written with `+faststart` to improve Telegram playback compatibility.
 
 No new Supabase migration is required for this maintenance update.
+
+## Telegram `getUpdates` conflict fix
+
+If Render logs show:
+
+```text
+telegram.error.Conflict: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+```
+
+It means the same `BOT_TOKEN` is being used by more than one polling process. Telegram allows only one `getUpdates` consumer per bot token.
+
+Fix checklist:
+
+1. In Render, keep only **one** active service for this bot token.
+2. If you previously created both a Web Service and a Worker Service, suspend/delete one of them.
+3. Stop any local terminal running `python -m app.main` or `python run_worker.py` with the same token.
+4. Make sure Render scaling/instances is set to `1`.
+5. Redeploy with **Manual Deploy → Clear build cache & deploy**.
+
+This build also adds a Redis polling instance lock:
+
+```env
+BOT_INSTANCE_LOCK_ENABLED=true
+BOT_INSTANCE_LOCK_KEY=bot:polling:instance_lock
+BOT_INSTANCE_LOCK_TTL_SECONDS=90
+BOT_INSTANCE_LOCK_REFRESH_SECONDS=25
+```
+
+The lock prevents two copies of this project from polling at the same time. It cannot stop an older build or a local script that does not use this lock, so still check Render services and local terminals when the error appears.

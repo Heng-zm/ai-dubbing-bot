@@ -88,3 +88,12 @@ No database migration is required. Redeploy the updated code only.
 - Prevented duplicate final video delivery after restart by storing a lightweight `final_sent` marker.
 - Startup recovery now marks tasks completed when the final video was already sent before a restart.
 - Added `-movflags +faststart` to MP4 output for better Telegram playback behavior.
+
+## Telegram Conflict Hotfix
+
+- Added Redis-based single polling instance lock to prevent two copies of the bot from calling Telegram `getUpdates` at the same time.
+- Added periodic lock refresh and safe lock release on shutdown.
+- Added clearer logging for `telegram.error.Conflict` so it is no longer reported as a generic unhandled update exception.
+- Added deployment troubleshooting instructions for duplicate Render services, old worker services, and local scripts using the same `BOT_TOKEN`.
+
+No Supabase migration is required.

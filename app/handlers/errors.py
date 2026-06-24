@@ -4,11 +4,26 @@ from __future__ import annotations
 
 from telegram import Update
 from telegram.ext import ContextTypes
+from telegram.error import Conflict
 
 from app.services.logger_service import log_db, logger
 
 
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if isinstance(context.error, Conflict):
+        logger.error(
+            "Telegram polling conflict: another getUpdates consumer is running for this BOT_TOKEN. "
+            "Stop duplicate Render services/workers or any local process using the same token."
+        )
+        await log_db(
+            "error",
+            "telegram_conflict",
+            "Another bot instance is running with the same BOT_TOKEN",
+            {"error": str(context.error)},
+        )
+        return
+
     logger.exception("Unhandled exception", exc_info=context.error)
     await log_db(
         "error",

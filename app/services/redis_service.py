@@ -40,6 +40,53 @@ class RedisService:
             await self.redis.aclose()
             self.redis = None
 
+
+    async def acquire_bot_instance_lock(self, owner: str) -> bool:
+        """Acquire a Redis lock so only one polling bot instance runs.
+
+        Telegram long polling allows only one active getUpdates consumer for a
+        bot token. Render redeploy overlap, duplicate services, or a local dev
+        process can otherwise trigger telegram.error.Conflict. This lock prevents
+        multiple instances of this project from starting polling at the same time.
+        """
+        if not settings.bot_instance_lock_enabled:
+            return True
+        redis = await self.connect()
+        return bool(
+            await redis.set(
+                settings.bot_instance_lock_key,
+                owner,
+                nx=True,
+                ex=settings.bot_instance_lock_ttl_seconds,
+            )
+        )
+
+    async def refresh_bot_instance_lock(self, owner: str) -> bool:
+        if not settings.bot_instance_lock_enabled:
+            return True
+        redis = await self.connect()
+        key = settings.bot_instance_lock_key
+        current = await redis.get(key)
+        if current != owner:
+            return False
+        await redis.expire(key, settings.bot_instance_lock_ttl_seconds)
+        return True
+
+    async def release_bot_instance_lock(self, owner: str) -> None:
+        if not settings.bot_instance_lock_enabled:
+            return
+        redis = await self.connect()
+        key = settings.bot_instance_lock_key
+        current = await redis.get(key)
+        if current == owner:
+            await redis.delete(key)
+
+    async def get_bot_instance_lock_owner(self) -> Optional[str]:
+        if not settings.bot_instance_lock_enabled:
+            return None
+        redis = await self.connect()
+        return await redis.get(settings.bot_instance_lock_key)
+
     async def get(self, key: str) -> Optional[str]:
         redis = await self.connect()
         return await redis.get(key)

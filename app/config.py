@@ -87,6 +87,10 @@ class Settings:
 
     redis_queue_key: str
     redis_socket_timeout_seconds: float
+    bot_instance_lock_enabled: bool
+    bot_instance_lock_key: str
+    bot_instance_lock_ttl_seconds: int
+    bot_instance_lock_refresh_seconds: int
     task_ttl_seconds: int
     task_lock_ttl_seconds: int
     worker_queue_timeout_seconds: int
@@ -179,6 +183,10 @@ settings = Settings(
     app_log_file=Path(os.getenv("APP_LOG_FILE", str(PROJECT_DIR / "logs" / "app.log"))),
     redis_queue_key=os.getenv("REDIS_QUEUE_KEY", "queue:dubbing").strip(),
     redis_socket_timeout_seconds=_get_float("REDIS_SOCKET_TIMEOUT_SECONDS", 10.0),
+    bot_instance_lock_enabled=_get_bool("BOT_INSTANCE_LOCK_ENABLED", True),
+    bot_instance_lock_key=os.getenv("BOT_INSTANCE_LOCK_KEY", "bot:polling:instance_lock").strip(),
+    bot_instance_lock_ttl_seconds=max(30, _get_int("BOT_INSTANCE_LOCK_TTL_SECONDS", 90)),
+    bot_instance_lock_refresh_seconds=max(10, _get_int("BOT_INSTANCE_LOCK_REFRESH_SECONDS", 25)),
     task_ttl_seconds=_get_int("TASK_TTL_SECONDS", 60 * 60 * 24),
     task_lock_ttl_seconds=_get_int("TASK_LOCK_TTL_SECONDS", 60 * 30),
     worker_queue_timeout_seconds=_get_int("WORKER_QUEUE_TIMEOUT_SECONDS", 2),

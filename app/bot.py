@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import socket
+import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
@@ -20,6 +23,30 @@ from app.services.runtime_settings import runtime_settings
 from app.services.supabase_service import supabase_service
 from app.utils.file_utils import check_ffmpeg_available, clean_temp_older_than
 from app.states import STATE_IDLE, TASK_COMPLETED, TASK_FAILED, TASK_PROCESSING
+
+
+async def _bot_instance_lock_refresher(application: Application, owner: str) -> None:
+    """Keep the polling instance lock alive while this process is healthy."""
+    try:
+        while True:
+            await asyncio.sleep(settings.bot_instance_lock_refresh_seconds)
+            refreshed = await redis_service.refresh_bot_instance_lock(owner)
+            if not refreshed:
+                logger.error(
+                    "Lost Telegram polling instance lock. Another bot process may be running. owner=%s",
+                    owner,
+                )
+                # Stop the application instead of allowing two polling consumers
+                # to fight and trigger Telegram Conflict errors.
+                try:
+                    await application.stop()
+                except RuntimeError:
+                    pass
+                break
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("Bot instance lock refresher stopped unexpectedly: %s", exc)
 
 
 async def _recover_interrupted_processing_tasks(application: Application) -> None:
@@ -137,6 +164,19 @@ async def _post_init(application: Application) -> None:
         else:
             raise RuntimeError(message)
 
+    lock_owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:10]}"
+    acquired = await redis_service.acquire_bot_instance_lock(lock_owner)
+    if not acquired:
+        current_owner = await redis_service.get_bot_instance_lock_owner()
+        raise RuntimeError(
+            "Telegram polling conflict protection stopped this process because another bot instance "
+            f"already holds {settings.bot_instance_lock_key}. Current owner={current_owner}. "
+            "Stop duplicate Render services/local processes or wait for the lock TTL to expire."
+        )
+    application.bot_data["bot_instance_lock_owner"] = lock_owner
+    application.bot_data["bot_instance_lock_task"] = asyncio.create_task(_bot_instance_lock_refresher(application, lock_owner))
+    logger.info("Acquired Telegram polling instance lock owner=%s key=%s", lock_owner, settings.bot_instance_lock_key)
+
     runtime = await runtime_settings.load(force=True)
     if bool(runtime.get("clear_stale_queue_on_start", settings.clear_stale_queue_on_start)):
         purged = await redis_service.purge_queue()
@@ -160,6 +200,19 @@ async def _post_init(application: Application) -> None:
 
 
 async def _post_shutdown(application: Application) -> None:
+    lock_task = application.bot_data.get("bot_instance_lock_task")
+    if lock_task:
+        lock_task.cancel()
+        await asyncio.gather(lock_task, return_exceptions=True)
+
+    lock_owner = application.bot_data.get("bot_instance_lock_owner")
+    if lock_owner:
+        try:
+            await redis_service.release_bot_instance_lock(str(lock_owner))
+            logger.info("Released Telegram polling instance lock owner=%s", lock_owner)
+        except Exception as exc:
+            logger.warning("Could not release Telegram polling instance lock: %s", exc)
+
     worker_tasks = application.bot_data.get("worker_tasks", [])
     for task in worker_tasks:
         task.cancel()
