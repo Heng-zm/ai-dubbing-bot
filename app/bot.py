@@ -49,6 +49,67 @@ async def _bot_instance_lock_refresher(application: Application, owner: str) -> 
         logger.warning("Bot instance lock refresher stopped unexpectedly: %s", exc)
 
 
+
+
+async def _acquire_bot_instance_lock_with_wait(owner: str) -> bool:
+    """Acquire the single-polling lock, waiting through Render deploy overlap.
+
+    Render can keep the old container alive for a short time while the new
+    container starts. If we immediately exit when the old container still owns
+    the Redis lock, Render may enter a restart loop even though the lock would
+    expire seconds later. This helper waits up to BOT_INSTANCE_LOCK_WAIT_SECONDS
+    and logs the current owner/TTL for easier debugging.
+    """
+    if not settings.bot_instance_lock_enabled:
+        return True
+
+    if await redis_service.acquire_bot_instance_lock(owner):
+        return True
+
+    wait_seconds = settings.bot_instance_lock_wait_seconds
+    if wait_seconds <= 0:
+        current_owner = await redis_service.get_bot_instance_lock_owner()
+        ttl = await redis_service.get_bot_instance_lock_ttl()
+        logger.error(
+            "Polling lock is held and waiting is disabled. key=%s owner=%s ttl=%s",
+            settings.bot_instance_lock_key,
+            current_owner,
+            ttl,
+        )
+        return False
+
+    deadline = asyncio.get_running_loop().time() + wait_seconds
+    attempt = 0
+    while True:
+        attempt += 1
+        current_owner = await redis_service.get_bot_instance_lock_owner()
+        ttl = await redis_service.get_bot_instance_lock_ttl()
+        remaining = max(0, int(deadline - asyncio.get_running_loop().time()))
+        logger.warning(
+            "Waiting for Telegram polling lock to clear. attempt=%s key=%s owner=%s ttl=%s wait_remaining=%ss",
+            attempt,
+            settings.bot_instance_lock_key,
+            current_owner,
+            ttl,
+            remaining,
+        )
+
+        if await redis_service.acquire_bot_instance_lock(owner):
+            logger.info("Acquired Telegram polling lock after waiting. owner=%s", owner)
+            return True
+
+        now = asyncio.get_running_loop().time()
+        if now >= deadline:
+            return False
+
+        # If Redis reports the lock will expire sooner than our normal interval,
+        # wake up shortly after that expiry instead of waiting a full interval.
+        interval = settings.bot_instance_lock_wait_interval_seconds
+        if ttl and ttl > 0:
+            interval = min(interval, max(1.0, float(ttl) + 0.5))
+        await asyncio.sleep(min(interval, max(0.0, deadline - now)))
+
+
 async def _recover_interrupted_processing_tasks(application: Application) -> None:
     """Mark tasks interrupted by a Render restart as failed with a retry button.
 
@@ -165,13 +226,15 @@ async def _post_init(application: Application) -> None:
             raise RuntimeError(message)
 
     lock_owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:10]}"
-    acquired = await redis_service.acquire_bot_instance_lock(lock_owner)
+    acquired = await _acquire_bot_instance_lock_with_wait(lock_owner)
     if not acquired:
         current_owner = await redis_service.get_bot_instance_lock_owner()
+        ttl = await redis_service.get_bot_instance_lock_ttl()
         raise RuntimeError(
             "Telegram polling conflict protection stopped this process because another bot instance "
-            f"already holds {settings.bot_instance_lock_key}. Current owner={current_owner}. "
-            "Stop duplicate Render services/local processes or wait for the lock TTL to expire."
+            f"already holds {settings.bot_instance_lock_key}. Current owner={current_owner}. TTL={ttl}s. "
+            "Stop duplicate Render services/local processes. If this is only a Render redeploy overlap, "
+            "wait for the previous deploy to stop or increase BOT_INSTANCE_LOCK_WAIT_SECONDS."
         )
     application.bot_data["bot_instance_lock_owner"] = lock_owner
     application.bot_data["bot_instance_lock_task"] = asyncio.create_task(_bot_instance_lock_refresher(application, lock_owner))

@@ -87,6 +87,25 @@ class RedisService:
         redis = await self.connect()
         return await redis.get(settings.bot_instance_lock_key)
 
+    async def get_bot_instance_lock_ttl(self) -> int:
+        """Return remaining TTL for the polling lock.
+
+        Redis returns -2 when the key does not exist and -1 when the key has no
+        expiry. The lock is always created with an expiry, but we keep the raw
+        value for troubleshooting.
+        """
+        if not settings.bot_instance_lock_enabled:
+            return -2
+        redis = await self.connect()
+        return int(await redis.ttl(settings.bot_instance_lock_key))
+
+    async def force_clear_bot_instance_lock(self) -> None:
+        """Delete the polling lock. Use only for manual recovery/admin tools."""
+        if not settings.bot_instance_lock_enabled:
+            return
+        redis = await self.connect()
+        await redis.delete(settings.bot_instance_lock_key)
+
     async def get(self, key: str) -> Optional[str]:
         redis = await self.connect()
         return await redis.get(key)

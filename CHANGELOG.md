@@ -1,4 +1,12 @@
 
+## Telegram conflict deployment wait fix
+
+- Added deploy-overlap wait before failing when Redis polling lock is held.
+- Added lock TTL logging for Render hibernate/old container debugging.
+- Added `BOT_INSTANCE_LOCK_WAIT_SECONDS` and `BOT_INSTANCE_LOCK_WAIT_INTERVAL_SECONDS`.
+- Added Redis helper methods for polling lock TTL/manual recovery.
+
+
 ## 78% Progress Freeze Hotfix
 
 - Added merge/upload progress heartbeat so the bot no longer appears stuck at 78%.

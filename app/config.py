@@ -91,6 +91,8 @@ class Settings:
     bot_instance_lock_key: str
     bot_instance_lock_ttl_seconds: int
     bot_instance_lock_refresh_seconds: int
+    bot_instance_lock_wait_seconds: int
+    bot_instance_lock_wait_interval_seconds: float
     task_ttl_seconds: int
     task_lock_ttl_seconds: int
     worker_queue_timeout_seconds: int
@@ -187,6 +189,8 @@ settings = Settings(
     bot_instance_lock_key=os.getenv("BOT_INSTANCE_LOCK_KEY", "bot:polling:instance_lock").strip(),
     bot_instance_lock_ttl_seconds=max(30, _get_int("BOT_INSTANCE_LOCK_TTL_SECONDS", 90)),
     bot_instance_lock_refresh_seconds=max(10, _get_int("BOT_INSTANCE_LOCK_REFRESH_SECONDS", 25)),
+    bot_instance_lock_wait_seconds=max(0, _get_int("BOT_INSTANCE_LOCK_WAIT_SECONDS", 150)),
+    bot_instance_lock_wait_interval_seconds=max(1.0, _get_float("BOT_INSTANCE_LOCK_WAIT_INTERVAL_SECONDS", 5.0)),
     task_ttl_seconds=_get_int("TASK_TTL_SECONDS", 60 * 60 * 24),
     task_lock_ttl_seconds=_get_int("TASK_LOCK_TTL_SECONDS", 60 * 30),
     worker_queue_timeout_seconds=_get_int("WORKER_QUEUE_TIMEOUT_SECONDS", 2),

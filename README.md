@@ -875,3 +875,33 @@ BOT_INSTANCE_LOCK_REFRESH_SECONDS=25
 ```
 
 The lock prevents two copies of this project from polling at the same time. It cannot stop an older build or a local script that does not use this lock, so still check Render services and local terminals when the error appears.
+
+
+## Telegram conflict deploy-overlap fix
+
+If Render shows:
+
+```text
+Conflict: terminated by other getUpdates request
+```
+
+or:
+
+```text
+Current owner=...hibernate...
+```
+
+it usually means the previous Render container is still stopping while the new
+container starts. This version waits for the Redis polling lock instead of
+crashing immediately. Recommended settings:
+
+```env
+BOT_INSTANCE_LOCK_ENABLED=true
+BOT_INSTANCE_LOCK_TTL_SECONDS=90
+BOT_INSTANCE_LOCK_REFRESH_SECONDS=25
+BOT_INSTANCE_LOCK_WAIT_SECONDS=150
+BOT_INSTANCE_LOCK_WAIT_INTERVAL_SECONDS=5
+```
+
+Still make sure only one Render service uses the same `BOT_TOKEN`. Suspend/delete
+old Web Services, Background Workers, and any local terminal running the bot.
